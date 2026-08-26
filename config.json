@@ -1,0 +1,23 @@
+{
+  "region": [
+    293,
+    261,
+    649,
+    712
+  ],
+  "target": [
+    1325,
+    919
+  ],
+  "submit": true,
+  "claude_status": [
+    1849,
+    960
+  ],
+  "claude_text_region": [
+    1280,
+    506,
+    135,
+    60
+  ]
+}
