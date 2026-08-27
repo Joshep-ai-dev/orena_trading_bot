@@ -60,6 +60,18 @@ detected center is printed and clicked after a valid answer item is selected.
 After selecting an answer, the bot clicks the detected submit button. In F7 repeat mode it waits
 while the button is inactive/background `#080C09`, then rescans for the moved submit control using
 color `#774E29`. When found, it prints the new position and starts the next cycle. Press F10 to stop.
+After detecting the `#080C09` inactive background, it waits five seconds. If answer-item detection
+fails on a later cycle, it uses the last known first-item position and submits that item.
+
+If Claude's recognized response contains `Rate limit exceeded — try again later`, the bot does not
+click Orenya. It waits 1 hour and 1 minute (3,660 seconds), then retries automatically. F10 stops
+the wait.
+
+All Claude/Orenya state waits have a 20-second no-change watchdog. A stalled state restarts the
+F7 workflow. The rate-limit message takes priority and still pauses for 1 hour and 1 minute.
+Empty OCR text from either Orenya or Claude also restarts the F7 workflow.
+If Orenya OCR contains `Rate limit exceeded`, the bot waits 1 hour and 1 minute without sending
+the text to Claude, then continues automatically.
 
 For a single capture/paste without the hotkey loop:
 

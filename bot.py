@@ -33,6 +33,8 @@ CONFIG_PATH = Path(__file__).with_name("config.json")
 OCR = RapidOCR()
 events: queue.Queue[str] = queue.Queue()
 stop_requested = threading.Event()
+last_first_item: tuple[int, int] | None = None
+RATE_LIMIT_RETRY = "__RATE_LIMIT_RETRY__"
 
 
 def enable_dpi_awareness() -> None:
@@ -320,10 +322,18 @@ def find_orenya_ready_submit(region: list[int]) -> tuple[int, int] | None:
 
 
 def show_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
+    global last_first_item
     positions = find_orenya_sections(region)
     if not positions:
         print("Orenya sections: none detected.", flush=True)
+        if last_first_item:
+            print(
+                f"Using cached first item: x={last_first_item[0]}, y={last_first_item[1]}",
+                flush=True,
+            )
+            positions = [last_first_item]
     else:
+        last_first_item = positions[0]
         print(f"Orenya sections ({len(positions)}):", flush=True)
         for index, (x, y) in enumerate(positions):
             label = chr(ord("A") + index) if index < 26 else str(index + 1)
@@ -350,21 +360,51 @@ def rgb_hex(rgb) -> str:
     return "#{:02X}{:02X}{:02X}".format(*rgb)
 
 
+def is_rate_limit_message(text: str) -> bool:
+    normalized = text.casefold()
+    return "rate limit exceeded" in normalized and "try again later" in normalized
+
+
+def pause_for_rate_limit() -> bool:
+    print("Claude rate limit detected; waiting 1 hour 1 minute (3660 seconds)...", flush=True)
+    if stop_requested.wait(3660.0):
+        return False
+    print("Rate-limit wait finished; retrying the F7 workflow.", flush=True)
+    return True
+
+
+def stalled_claude_result(config: dict) -> str:
+    """Check rate limiting before restarting a Claude state stalled for 20 seconds."""
+    visible_text = recognize(capture(config["claude_text_region"]))
+    if is_rate_limit_message(visible_text):
+        if pause_for_rate_limit():
+            return RATE_LIMIT_RETRY
+        return ""
+    print("No Claude state change for 20 seconds; restarting the F7 workflow.", flush=True)
+    return RATE_LIMIT_RETRY
+
+
 def read_claude_result(config: dict) -> str | None:
     running_color = "#603B2F"
     status = tuple(config["claude_status"])
 
-    # First observe Claude entering its black running state. This prevents the
+    # First observe Claude entering its configured running-color state. This prevents the
     # idle button seen immediately after pressing Enter from being mistaken for completion.
     print(f"Waiting for Claude running color {running_color}...", flush=True)
+    deadline = time.monotonic() + 20.0
     while not stop_requested.is_set() and rgb_hex(pyautogui.pixel(*status)) != running_color:
+        if time.monotonic() >= deadline:
+            return stalled_claude_result(config)
         time.sleep(0.05)
 
     if stop_requested.is_set():
         return None
 
     print("Claude is running...", flush=True)
+    deadline = time.monotonic() + 20.0
     while not stop_requested.is_set() and rgb_hex(pyautogui.pixel(*status)) == running_color:
+        if time.monotonic() >= deadline:
+            return stalled_claude_result(config)
         time.sleep(0.05)
 
     if stop_requested.is_set():
@@ -373,11 +413,13 @@ def read_claude_result(config: dict) -> str | None:
     time.sleep(0.2)
     result_text = recognize(capture(config["claude_text_region"]))
     if not result_text:
-        print("Claude finished, but no response text was recognized.", flush=True)
-        return None
+        print("Claude response text is empty; restarting the F7 workflow.", flush=True)
+        return RATE_LIMIT_RETRY
     pyperclip.copy(result_text)
     print("Claude result (copied to clipboard):", flush=True)
     print(result_text, flush=True)
+    if is_rate_limit_message(result_text):
+        return RATE_LIMIT_RETRY if pause_for_rate_limit() else None
     return result_text
 
 
@@ -396,11 +438,9 @@ def click_orenya_answer(result_text: str, positions: list[tuple[int, int]]) -> b
         print("Cannot click Orenya: no answer sections were detected.", flush=True)
         return False
     if index >= len(positions):
-        print(
-            f"Cannot click Orenya item {index + 1}: only {len(positions)} sections were detected.",
-            flush=True,
-        )
-        return False
+        print(f"Item {index + 1} was not found; selecting the first item instead.", flush=True)
+        index = 0
+        answer = "fallback-first"
     x, y = positions[index]
     pyautogui.click(x, y)
     print(f"Orenya click: answer={answer}, item={index + 1}, x={x}, y={y}", flush=True)
@@ -422,6 +462,7 @@ def wait_for_next_orenya(region: list[int], submitted_at: tuple[int, int]) -> bo
     inactive = np.array([0x08, 0x0C, 0x09], dtype=np.int16)
     saw_inactive = False
     print("Waiting for Orenya submit button to become inactive...", flush=True)
+    deadline = time.monotonic() + 20.0
     while not stop_requested.is_set():
         color = np.array(pyautogui.pixel(*submitted_at), dtype=np.int16)
         if np.max(np.abs(color - inactive)) <= 20:
@@ -430,12 +471,21 @@ def wait_for_next_orenya(region: list[int], submitted_at: tuple[int, int]) -> bo
                 saw_inactive = True
         if find_orenya_submit(region) is None:
             break
+        if time.monotonic() >= deadline:
+            print("No Orenya state change for 20 seconds; restarting the F7 workflow.", flush=True)
+            return True
         time.sleep(0.2)
 
     if stop_requested.is_set():
         return False
 
+    if saw_inactive:
+        print("Inactive background detected; waiting 5 seconds...", flush=True)
+        if stop_requested.wait(5.0):
+            return False
+
     print("Refinding moved submit button with color similar to #774E29...", flush=True)
+    deadline = time.monotonic() + 20.0
     while not stop_requested.is_set():
         ready_position = find_orenya_ready_submit(region)
         if ready_position is not None:
@@ -445,17 +495,23 @@ def wait_for_next_orenya(region: list[int], submitted_at: tuple[int, int]) -> bo
                 flush=True,
             )
             return True
+        if time.monotonic() >= deadline:
+            print("No Orenya ready-state change for 20 seconds; restarting F7.", flush=True)
+            return True
         time.sleep(0.2)
     return False
 
 
-def run_once(config: dict) -> tuple[int, int] | None:
+def run_once(config: dict) -> tuple[int, int] | str | None:
     print("Capturing...", flush=True)
     positions = show_orenya_sections(config["region"])
     text = recognize(capture(config["region"]))
     if not text:
-        print("No text recognized. Adjust the region with F9.", flush=True)
-        return None
+        print("Orenya question text is empty; restarting the F7 workflow.", flush=True)
+        return RATE_LIMIT_RETRY
+    if "rate limit exceeded" in text.casefold():
+        print("Orenya OCR contains 'Rate limit exceeded'.", flush=True)
+        return RATE_LIMIT_RETRY if pause_for_rate_limit() else None
     pyperclip.copy(text)
     pyautogui.click(*config["target"])
     time.sleep(0.15)
@@ -466,6 +522,8 @@ def run_once(config: dict) -> tuple[int, int] | None:
     print(f"Pasted {len(text)} characters into Claude.", flush=True)
     if config.get("submit", False):
         result_text = read_claude_result(config)
+        if result_text == RATE_LIMIT_RETRY:
+            return RATE_LIMIT_RETRY
         if result_text:
             if click_orenya_answer(result_text, positions):
                 time.sleep(0.2)
@@ -476,6 +534,8 @@ def run_once(config: dict) -> tuple[int, int] | None:
 def run_repeating(config: dict) -> None:
     while not stop_requested.is_set():
         submitted_at = run_once(config)
+        if submitted_at == RATE_LIMIT_RETRY:
+            continue
         if not submitted_at:
             return
         if not wait_for_next_orenya(config["region"], submitted_at):
@@ -497,7 +557,9 @@ def main() -> int:
         print(exc, file=sys.stderr)
         return 2
     if args.once:
-        run_once(config)
+        while not stop_requested.is_set():
+            if run_once(config) != RATE_LIMIT_RETRY:
+                break
         return 0
 
     busy = threading.Lock()
@@ -531,7 +593,9 @@ def main() -> int:
                 if action == "repeat":
                     run_repeating(config)
                 else:
-                    run_once(config)
+                    while not stop_requested.is_set():
+                        if run_once(config) != RATE_LIMIT_RETRY:
+                            break
             except Exception as exc:  # Keep the hotkey service alive and expose the real error.
                 print(f"Capture failed: {exc}", file=sys.stderr, flush=True)
             finally:
