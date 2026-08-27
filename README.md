@@ -38,6 +38,29 @@ The coordinates are saved in `config.json`. Run setup again after moving/resizin
 py bot.py
 ```
 
+## Desktop interface
+
+Start the Windows interface with:
+
+```powershell
+python gui.py
+```
+
+Use **Setup** first, then **Start Repeat**, **Run Once**, or **Stop**. Runtime messages appear in
+the interface log panel.
+
+## Build a Windows executable
+
+Build from an activated Windows virtual environment:
+
+```powershell
+python -m pip install -r requirements-build.txt
+python -m PyInstaller --noconfirm --clean --onefile --windowed --name OrenyaBot --collect-all rapidocr_onnxruntime --collect-all onnxruntime gui.py
+```
+
+The executable is created at `dist\OrenyaBot.exe`. Keep `config.json` beside the executable after
+running Setup. Build on Windows because the bot captures and controls the Windows desktop.
+
 - **F7** — repeat capture, answer, and submit cycles until F10
 - **F8** — run one capture/OCR/paste cycle
 - **F9** — select the area and Claude box again

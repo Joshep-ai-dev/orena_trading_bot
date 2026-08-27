@@ -29,7 +29,8 @@ from pynput import keyboard
 from rapidocr_onnxruntime import RapidOCR
 
 
-CONFIG_PATH = Path(__file__).with_name("config.json")
+APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+CONFIG_PATH = APP_DIR / "config.json"
 OCR = RapidOCR()
 events: queue.Queue[str] = queue.Queue()
 stop_requested = threading.Event()
