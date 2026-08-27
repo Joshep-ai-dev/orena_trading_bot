@@ -94,6 +94,9 @@ class BotApp:
             bot.setup()
         finally:
             self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+            self.root.update_idletasks()
 
     def start_repeat(self) -> None:
         self.start_worker(bot.run_repeating, "Repeating — press Stop to finish")

@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 import ctypes
+from datetime import datetime, timedelta, timezone
 import json
 import math
 import queue
@@ -35,6 +36,7 @@ events: queue.Queue[str] = queue.Queue()
 stop_requested = threading.Event()
 last_first_item: tuple[int, int] | None = None
 RATE_LIMIT_RETRY = "__RATE_LIMIT_RETRY__"
+GMT_PLUS_9 = timezone(timedelta(hours=9))
 
 
 def enable_dpi_awareness() -> None:
@@ -73,6 +75,11 @@ class ScreenPicker:
         self.result = None
         self.start = None
         self.rect = None
+        # A newly created Tk root can briefly map as a blank white window and
+        # then be captured by ImageGrab. Keep it hidden until the overlay is ready.
+        root.withdraw()
+        root.update_idletasks()
+        time.sleep(0.1)
         shot = ImageGrab.grab(all_screens=False)
         self.photo = ImageTk.PhotoImage(shot)
 
@@ -91,6 +98,10 @@ class ScreenPicker:
             self.canvas.bind("<ButtonRelease-1>", self.release)
         else:
             self.canvas.bind("<Button-1>", self.click)
+        root.deiconify()
+        root.lift()
+        root.focus_force()
+        root.update_idletasks()
 
     def press(self, event) -> None:
         self.start = (event.x, event.y)
@@ -167,8 +178,19 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
     height, width = pixels.shape[:2]
     background = np.array([0x05, 0x08, 0x06], dtype=np.int16)
     color_distance = np.max(np.abs(pixels - background), axis=2)
+    item_color = np.array([0x08, 0x0C, 0x09], dtype=np.int16)
+    item_mask = np.max(np.abs(pixels - item_color), axis=2) <= 12
     bright = np.max(pixels, axis=2) >= 150
-    click_x = region[0] + width - 10
+
+    def item_center(top_edge: int, bottom_edge: int) -> tuple[int, int]:
+        """Return the center of the #080C09 item pixels within two boundaries."""
+        ys, xs = np.nonzero(item_mask[top_edge + 1:bottom_edge])
+        if len(xs) >= 20:
+            left_edge, right_edge = int(xs.min()), int(xs.max())
+            center_x = (left_edge + right_edge) // 2
+        else:
+            center_x = width // 2
+        return region[0] + center_x, region[1] + (top_edge + bottom_edge) // 2
 
     # Primary separator method: #0F1511 is the horizontal color between items.
     separator = np.array([0x0F, 0x15, 0x11], dtype=np.int16)
@@ -185,7 +207,9 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
             continue
         if np.count_nonzero(bright[top_edge + 1:bottom_edge]) < 8:
             continue
-        separated_sections.append((click_x, region[1] + (top_edge + bottom_edge) // 2))
+        if np.count_nonzero(item_mask[top_edge + 1:bottom_edge]) < 20:
+            continue
+        separated_sections.append(item_center(top_edge, bottom_edge))
     if len(separated_sections) >= 2:
         return separated_sections
 
@@ -204,7 +228,7 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
                 continue
             if np.count_nonzero(bright[start:end + 1]) < 8:
                 continue
-            candidate_sections.append((click_x, region[1] + (start + end) // 2))
+            candidate_sections.append(item_center(start, end))
         if len(candidate_sections) > len(best_column_sections):
             best_column_sections = candidate_sections
 
@@ -224,7 +248,7 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
         # Reject spaces between cards: a real card contains visible text.
         if np.count_nonzero(bright[top_edge + 1:bottom_edge]) < 8:
             continue
-        sections.append((region[0] + width - 10, region[1] + (top_edge + bottom_edge) // 2))
+        sections.append(item_center(top_edge, bottom_edge))
 
     # Remove duplicate centers caused by thick or decorated borders.
     unique: list[tuple[int, int]] = []
@@ -415,6 +439,25 @@ def pause_for_rate_limit() -> bool:
     return True
 
 
+def wait_for_daily_schedule() -> bool:
+    """Pause daily from 08:51:00 until 09:00:00 in GMT+9."""
+    now = datetime.now(GMT_PLUS_9)
+    seconds_after_midnight = now.hour * 3600 + now.minute * 60 + now.second
+    if not 8 * 3600 + 51 * 60 <= seconds_after_midnight < 9 * 3600:
+        return not stop_requested.is_set()
+    resume_at = now.replace(hour=9, minute=0, second=0, microsecond=0)
+    seconds = max(0.0, (resume_at - now).total_seconds())
+    print(
+        f"GMT+9 schedule pause at {now:%H:%M:%S}; resuming at 09:00:00 "
+        f"({seconds:.1f}s remaining).",
+        flush=True,
+    )
+    if stop_requested.wait(seconds):
+        return False
+    print("GMT+9 time is 09:00:00; automation resumed.", flush=True)
+    return True
+
+
 def answer_index(result_text: str) -> tuple[str, int]:
     """Map A-D to items 1-4; all other recognized text maps to item 1."""
     match = re.search(r"(?im)^\s*(?:ANSWER\s*[:\-]?\s*)?([ABCD])(?:\s*[.):\-]|\s*$)", result_text)
@@ -495,6 +538,8 @@ def wait_for_next_orenya(region: list[int], submitted_at: tuple[int, int]) -> bo
 
 
 def run_once(config: dict) -> tuple[int, int] | str | None:
+    if not wait_for_daily_schedule():
+        return None
     print("Reading Orenya...", flush=True)
     positions = show_orenya_sections(config["region"])
     text = copy_orenya_text(config["region"])
@@ -513,14 +558,20 @@ def run_once(config: dict) -> tuple[int, int] | str | None:
         for label, score in scores:
             print(f"  {label}: {score:.4f}", flush=True)
     print(f"Local model selected: {selected}", flush=True)
+    if not wait_for_daily_schedule():
+        return None
     if click_orenya_answer(selected, positions):
         time.sleep(0.2)
+        if not wait_for_daily_schedule():
+            return None
         return click_orenya_submit(config["region"])
     return None
 
 
 def run_repeating(config: dict) -> None:
     while not stop_requested.is_set():
+        if not wait_for_daily_schedule():
+            return
         submitted_at = run_once(config)
         if submitted_at == RATE_LIMIT_RETRY:
             continue

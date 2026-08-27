@@ -44,13 +44,17 @@ The bot selects browser text by clicking near the region's top-left, Shift-click
 bottom-left, and copying. It prints the extracted query, answer list, TF-IDF scores, selected
 answer, item coordinates, and submit coordinates.
 
-Answer sections are found using the `#0F1511` separator and `#050806` background colors. The
-filled Submit button is found dynamically between screen Y 450 and 900 using colors similar to
-`#F79346`; its Y position is not fixed. Repeat mode waits for `#080C09`, pauses five seconds, and
+Answer sections are found using item color `#080C09` and `#0F1511` boundaries; each item is clicked
+at its detected rectangle center. The filled Submit button is found dynamically between screen Y
+450 and 900 using colors similar to `#F79346` and is clicked at its cluster center; its Y position
+is not fixed. Repeat mode waits for `#080C09`, pauses five seconds, and
 then refinds the moved `#774E29` control before continuing.
 
 If Orenya text contains `Rate limit exceeded`, the bot waits 1 hour and 1 minute and then retries.
 Empty selected text also retries.
+
+Automation pauses every day from 08:51:00 through 08:59:59 in GMT+9 and resumes at 09:00:00.
+F10 can stop the bot during this scheduled pause.
 
 ## Desktop interface
 
