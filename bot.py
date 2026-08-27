@@ -524,9 +524,6 @@ def run_once(config: dict) -> tuple[int, int] | str | None:
     if not text:
         print("Selected Orenya text is empty; restarting the F7 workflow.", flush=True)
         return RATE_LIMIT_RETRY
-    if "rate limit exceeded" in text.casefold():
-        print("Orenya text contains 'Rate limit exceeded'.", flush=True)
-        return RATE_LIMIT_RETRY if pause_for_rate_limit() else None
     selected, scores = choose_local_answer(text)
     best_score = dict(scores).get(selected, 0.0)
     print(f"Selected answer: {selected} (score={best_score:.4f})", flush=True)
@@ -551,6 +548,11 @@ def run_repeating(config: dict) -> None:
             return
         if not wait_for_next_orenya(config["region"], submitted_at):
             return
+        next_text = copy_orenya_text(config["region"])
+        if "rate limit exceeded" in next_text.casefold():
+            print("Next result is rate-limited.", flush=True)
+            if not pause_for_rate_limit():
+                return
 
 
 def main() -> int:
