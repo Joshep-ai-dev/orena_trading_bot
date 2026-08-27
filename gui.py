@@ -91,7 +91,7 @@ class BotApp:
             return
         self.root.withdraw()
         try:
-            bot.setup()
+            bot.setup(self.root)
         finally:
             self.root.deiconify()
             self.root.lift()

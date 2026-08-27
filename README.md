@@ -50,10 +50,12 @@ at its detected rectangle center. The filled Submit button is found dynamically 
 is not fixed. Repeat mode waits for `#080C09`, pauses five seconds, and
 then refinds the moved `#774E29` control before continuing.
 
-If Orenya text contains `Rate limit exceeded`, the bot waits 1 hour and 1 minute and then retries.
+If Orenya text contains `Rate limit exceeded`, the bot pauses for 10 minutes and then starts the
+complete F7 function again. It checks the newly selected text before any answer/submit action,
+waits another 10 minutes if the message remains, and continues normally when it disappears.
 Empty selected text also retries.
 
-Automation pauses every day from 08:51:00 through 08:59:59 in GMT+9 and resumes at 09:00:00.
+Automation pauses every day from 07:59:58 through 08:59:59 in GMT+9 and resumes at 09:00:00.
 F10 can stop the bot during this scheduled pause.
 
 ## Desktop interface

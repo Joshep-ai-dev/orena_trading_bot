@@ -69,7 +69,7 @@ def load_config() -> dict:
 
 
 class ScreenPicker:
-    def __init__(self, root: tk.Tk, title: str, mode: str) -> None:
+    def __init__(self, root: tk.Misc, title: str, mode: str) -> None:
         self.root = root
         self.mode = mode
         self.result = None
@@ -81,7 +81,10 @@ class ScreenPicker:
         root.update_idletasks()
         time.sleep(0.1)
         shot = ImageGrab.grab(all_screens=False)
-        self.photo = ImageTk.PhotoImage(shot)
+        # Bind the image to this picker's Tcl interpreter. Without an explicit
+        # master, GUI mode may create it in the main window's interpreter and
+        # the picker canvas then raises: image "pyimageN" doesn't exist.
+        self.photo = ImageTk.PhotoImage(shot, master=root)
 
         root.attributes("-fullscreen", True)
         root.attributes("-topmost", True)
@@ -134,15 +137,19 @@ class ScreenPicker:
         self.root.destroy()
 
 
-def pick(title: str, mode: str):
-    root = tk.Tk()
+def pick(title: str, mode: str, parent: tk.Misc | None = None):
+    owns_root = parent is None
+    root = tk.Tk() if owns_root else tk.Toplevel(parent)
     picker = ScreenPicker(root, title, mode)
-    root.mainloop()
+    if owns_root:
+        root.mainloop()
+    else:
+        parent.wait_window(root)
     return picker.result
 
 
-def setup() -> None:
-    region = pick("Drag a box around the Orenya question and choices. Esc cancels.", "region")
+def setup(parent: tk.Misc | None = None) -> None:
+    region = pick("Drag a box around the Orenya question and choices. Esc cancels.", "region", parent)
     if not region:
         print("Setup cancelled.")
         return
@@ -342,13 +349,13 @@ def copy_orenya_text(region: list[int]) -> str:
     """Select the Orenya region as browser text and return the clipboard value."""
     left, top, _width, height = region
     top_left = (left + 5, top + 5)
-    bottom_left = (left + 5, top + height - 5)
+    bottom_right = (left +_width - 5, top + height - 5)
     pyperclip.copy("")
     pyautogui.click(*top_left)
     time.sleep(0.1)
     pyautogui.keyDown("shift")
     try:
-        pyautogui.click(*bottom_left)
+        pyautogui.click(*bottom_right)
     finally:
         pyautogui.keyUp("shift")
     time.sleep(0.1)
@@ -432,18 +439,18 @@ def choose_local_answer(text: str) -> tuple[str, list[tuple[str, float]]]:
 
 
 def pause_for_rate_limit() -> bool:
-    print("Orenya rate limit detected; waiting 1 hour 1 minute (3660 seconds)...", flush=True)
-    if stop_requested.wait(3660.0):
+    print("Orenya rate limit detected; waiting 10 minutes before one retry...", flush=True)
+    if stop_requested.wait(600.0):
         return False
-    print("Rate-limit wait finished; retrying the F7 workflow.", flush=True)
+    print("10-minute wait finished; running one F7 retry check.", flush=True)
     return True
 
 
 def wait_for_daily_schedule() -> bool:
-    """Pause daily from 08:51:00 until 09:00:00 in GMT+9."""
+    """Pause daily from 07:59:58 until 09:00:00 in GMT+9."""
     now = datetime.now(GMT_PLUS_9)
     seconds_after_midnight = now.hour * 3600 + now.minute * 60 + now.second
-    if not 8 * 3600 + 51 * 60 <= seconds_after_midnight < 9 * 3600:
+    if not 7 * 3600 + 59 * 60 + 58 <= seconds_after_midnight < 9 * 3600:
         return not stop_requested.is_set()
     resume_at = now.replace(hour=9, minute=0, second=0, microsecond=0)
     seconds = max(0.0, (resume_at - now).total_seconds())
