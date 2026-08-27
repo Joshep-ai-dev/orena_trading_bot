@@ -1,4 +1,4 @@
-"""Capture an Orenya task, OCR it, and paste the text into Claude.
+"""Select Orenya text, choose an answer locally, and submit it.
 
 Windows usage:
     py -m pip install -r requirements.txt
@@ -9,8 +9,10 @@ Windows usage:
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import ctypes
 import json
+import math
 import queue
 import re
 import sys
@@ -18,20 +20,17 @@ import threading
 import time
 from pathlib import Path
 import tkinter as tk
-from tkinter import messagebox
 
 import mss
 import numpy as np
-from PIL import Image, ImageEnhance, ImageGrab, ImageTk
+from PIL import Image, ImageGrab, ImageTk
 import pyautogui
 import pyperclip
 from pynput import keyboard
-from rapidocr_onnxruntime import RapidOCR
 
 
 APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
 CONFIG_PATH = APP_DIR / "config.json"
-OCR = RapidOCR()
 events: queue.Queue[str] = queue.Queue()
 stop_requested = threading.Event()
 last_first_item: tuple[int, int] | None = None
@@ -51,21 +50,9 @@ def enable_dpi_awareness() -> None:
             pass
 
 
-def save_config(
-    region: tuple[int, int, int, int],
-    target: tuple[int, int],
-    submit: bool,
-    claude_status: tuple[int, int],
-    claude_text_region: tuple[int, int, int, int],
-) -> None:
+def save_config(region: tuple[int, int, int, int]) -> None:
     CONFIG_PATH.write_text(
-        json.dumps({
-            "region": region,
-            "target": target,
-            "submit": submit,
-            "claude_status": claude_status,
-            "claude_text_region": claude_text_region,
-        }, indent=2),
+        json.dumps({"region": region}, indent=2),
         encoding="utf-8",
     )
 
@@ -74,10 +61,7 @@ def load_config() -> dict:
     if not CONFIG_PATH.exists():
         raise FileNotFoundError("No config.json. Run: py bot.py --setup")
     data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
-    if (len(data.get("region", [])) != 4
-            or len(data.get("target", [])) != 2
-            or len(data.get("claude_status", [])) != 2
-            or len(data.get("claude_text_region", [])) != 4):
+    if len(data.get("region", [])) != 4:
         raise ValueError("config.json is invalid. Run: py bot.py --setup")
     return data
 
@@ -151,34 +135,8 @@ def setup() -> None:
     if not region:
         print("Setup cancelled.")
         return
-    target = pick("Click inside Claude's 'Write a message' box. Esc cancels.", "point")
-    if not target:
-        print("Setup cancelled.")
-        return
-    claude_status = pick("Click the #603B2F part of Claude's running/submit button.", "point")
-    if not claude_status:
-        print("Setup cancelled.")
-        return
-    claude_text_region = pick("Drag a box around Claude's response text area.", "region")
-    if not claude_text_region:
-        print("Setup cancelled.")
-        return
-    root = tk.Tk()
-    root.withdraw()
-    submit = messagebox.askyesno("Auto-submit", "Press Enter automatically after pasting into Claude?")
-    root.destroy()
-    save_config(region, target, submit, claude_status, claude_text_region)
+    save_config(region)
     print(f"Saved {CONFIG_PATH}")
-
-
-def capture(region: list[int]) -> Image.Image:
-    left, top, width, height = region
-    with mss.mss() as sct:
-        raw = sct.grab({"left": left, "top": top, "width": width, "height": height})
-    image = Image.frombytes("RGB", raw.size, raw.rgb)
-    # Mild enlargement and contrast improve small browser text without destroying punctuation.
-    image = image.resize((image.width * 2, image.height * 2), Image.Resampling.LANCZOS)
-    return ImageEnhance.Contrast(image).enhance(1.25)
 
 
 def capture_raw(region: list[int]) -> Image.Image:
@@ -356,16 +314,6 @@ def show_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
     return positions
 
 
-def recognize(image: Image.Image) -> str:
-    result, _elapsed = OCR(np.asarray(image))
-    if not result:
-        return ""
-    # RapidOCR returns [box, text, confidence]. Sorting restores reading order.
-    rows = sorted(result, key=lambda item: (min(p[1] for p in item[0]), min(p[0] for p in item[0])))
-    lines = [item[1].strip() for item in rows if item[1].strip() and float(item[2]) >= 0.35]
-    return "\n".join(lines)
-
-
 def copy_orenya_text(region: list[int]) -> str:
     """Select the Orenya region as browser text and return the clipboard value."""
     left, top, _width, height = region
@@ -404,71 +352,67 @@ def show_answer_list(text: str) -> None:
         print(f"  {label}: {value}", flush=True)
 
 
-def rgb_hex(rgb) -> str:
-    return "#{:02X}{:02X}{:02X}".format(*rgb)
+STOP_WORDS = {
+    "a", "an", "and", "are", "as", "at", "be", "best", "by", "for", "from", "in",
+    "is", "it", "of", "on", "or", "pick", "product", "shopping", "the", "this", "to",
+    "with", "your",
+}
 
 
-def is_rate_limit_message(text: str) -> bool:
-    normalized = text.casefold()
-    return "rate limit exceeded" in normalized and "try again later" in normalized
+def tokens(text: str) -> list[str]:
+    return [word for word in re.findall(r"[a-z0-9]+", text.casefold()) if word not in STOP_WORDS]
+
+
+def extract_query(text: str) -> str:
+    first_answer = re.search(r"(?m)^\s*[A-D][.):]\s*", text)
+    prefix = text[:first_answer.start()] if first_answer else text
+    candidates: list[str] = []
+    for raw_line in prefix.splitlines():
+        line = raw_line.strip()
+        lowered = line.casefold()
+        if not line or "product match" in lowered or "pick the best" in lowered or "rewards" in lowered:
+            continue
+        candidates.append(line)
+    return candidates[-1] if candidates else ""
+
+
+def choose_local_answer(text: str) -> tuple[str, list[tuple[str, float]]]:
+    """Rank answers using a small local TF-IDF/cosine text model."""
+    answers = extract_answer_list(text)
+    if not answers:
+        return "A", []
+    query = extract_query(text)
+    query_counts = Counter(tokens(query))
+    answer_counts = [Counter(tokens(value)) for _label, value in answers]
+    document_count = len(answer_counts)
+    document_frequency = Counter(
+        word for counts in answer_counts for word in counts
+    )
+
+    def weight(word: str) -> float:
+        return math.log((document_count + 1) / (document_frequency[word] + 1)) + 1.0
+
+    query_norm = math.sqrt(sum((count * weight(word)) ** 2 for word, count in query_counts.items()))
+    scores: list[tuple[str, float]] = []
+    for (label, value), counts in zip(answers, answer_counts):
+        answer_norm = math.sqrt(sum((count * weight(word)) ** 2 for word, count in counts.items()))
+        dot = sum(
+            query_count * weight(word) * counts.get(word, 0) * weight(word)
+            for word, query_count in query_counts.items()
+        )
+        score = dot / (query_norm * answer_norm) if query_norm and answer_norm else 0.0
+        if query and query.casefold() in value.casefold():
+            score += 1.0
+        scores.append((label, score))
+    return max(scores, key=lambda item: item[1])[0], scores
 
 
 def pause_for_rate_limit() -> bool:
-    print("Claude rate limit detected; waiting 1 hour 1 minute (3660 seconds)...", flush=True)
+    print("Orenya rate limit detected; waiting 1 hour 1 minute (3660 seconds)...", flush=True)
     if stop_requested.wait(3660.0):
         return False
     print("Rate-limit wait finished; retrying the F7 workflow.", flush=True)
     return True
-
-
-def stalled_claude_result(config: dict) -> str:
-    """Check rate limiting before restarting a Claude state stalled for 20 seconds."""
-    visible_text = recognize(capture(config["claude_text_region"]))
-    if is_rate_limit_message(visible_text):
-        if pause_for_rate_limit():
-            return RATE_LIMIT_RETRY
-        return ""
-    print("No Claude state change for 20 seconds; restarting the F7 workflow.", flush=True)
-    return RATE_LIMIT_RETRY
-
-
-def read_claude_result(config: dict) -> str | None:
-    running_color = "#603B2F"
-    status = tuple(config["claude_status"])
-
-    # First observe Claude entering its configured running-color state. This prevents the
-    # idle button seen immediately after pressing Enter from being mistaken for completion.
-    print(f"Waiting for Claude running color {running_color}...", flush=True)
-    deadline = time.monotonic() + 20.0
-    while not stop_requested.is_set() and rgb_hex(pyautogui.pixel(*status)) != running_color:
-        if time.monotonic() >= deadline:
-            return stalled_claude_result(config)
-        time.sleep(0.05)
-
-    if stop_requested.is_set():
-        return None
-
-    print("Claude is running...", flush=True)
-    deadline = time.monotonic() + 20.0
-    while not stop_requested.is_set() and rgb_hex(pyautogui.pixel(*status)) == running_color:
-        if time.monotonic() >= deadline:
-            return stalled_claude_result(config)
-        time.sleep(0.05)
-
-    if stop_requested.is_set():
-        return None
-
-    time.sleep(0.2)
-    result_text = recognize(capture(config["claude_text_region"]))
-    if not result_text:
-        print("Claude response text is empty; restarting the F7 workflow.", flush=True)
-        return RATE_LIMIT_RETRY
-    pyperclip.copy(result_text)
-    print("Claude result (copied to clipboard):", flush=True)
-    print(result_text, flush=True)
-    if is_rate_limit_message(result_text):
-        return RATE_LIMIT_RETRY if pause_for_rate_limit() else None
-    return result_text
 
 
 def answer_index(result_text: str) -> tuple[str, int]:
@@ -551,7 +495,7 @@ def wait_for_next_orenya(region: list[int], submitted_at: tuple[int, int]) -> bo
 
 
 def run_once(config: dict) -> tuple[int, int] | str | None:
-    print("Capturing...", flush=True)
+    print("Reading Orenya...", flush=True)
     positions = show_orenya_sections(config["region"])
     text = copy_orenya_text(config["region"])
     if not text:
@@ -559,24 +503,19 @@ def run_once(config: dict) -> tuple[int, int] | str | None:
         return RATE_LIMIT_RETRY
     show_answer_list(text)
     if "rate limit exceeded" in text.casefold():
-        print("Orenya OCR contains 'Rate limit exceeded'.", flush=True)
+        print("Orenya text contains 'Rate limit exceeded'.", flush=True)
         return RATE_LIMIT_RETRY if pause_for_rate_limit() else None
-    pyperclip.copy(text)
-    pyautogui.click(*config["target"])
-    time.sleep(0.15)
-    pyautogui.hotkey("ctrl", "v")
-    if config.get("submit", False):
-        time.sleep(0.15)
-        pyautogui.press("enter")
-    print(f"Pasted {len(text)} characters into Claude.", flush=True)
-    if config.get("submit", False):
-        result_text = read_claude_result(config)
-        if result_text == RATE_LIMIT_RETRY:
-            return RATE_LIMIT_RETRY
-        if result_text:
-            if click_orenya_answer(result_text, positions):
-                time.sleep(0.2)
-                return click_orenya_submit(config["region"])
+    query = extract_query(text)
+    selected, scores = choose_local_answer(text)
+    print(f"Shopping query: {query or '(not found)'}", flush=True)
+    if scores:
+        print("Local TF-IDF scores:", flush=True)
+        for label, score in scores:
+            print(f"  {label}: {score:.4f}", flush=True)
+    print(f"Local model selected: {selected}", flush=True)
+    if click_orenya_answer(selected, positions):
+        time.sleep(0.2)
+        return click_orenya_submit(config["region"])
     return None
 
 
@@ -594,8 +533,8 @@ def run_repeating(config: dict) -> None:
 def main() -> int:
     enable_dpi_awareness()
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--setup", action="store_true", help="select OCR region and Claude input")
-    parser.add_argument("--once", action="store_true", help="capture and paste once, then quit")
+    parser.add_argument("--setup", action="store_true", help="select the Orenya task region")
+    parser.add_argument("--once", action="store_true", help="choose and submit once, then quit")
     args = parser.parse_args()
     if args.setup:
         setup()

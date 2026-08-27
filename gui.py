@@ -1,4 +1,4 @@
-"""Windows desktop interface for the Orenya OCR bot."""
+"""Windows desktop interface for the local Orenya answer bot."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ class BotApp:
         self.worker: threading.Thread | None = None
         self.original_stdout = sys.stdout
 
-        root.title("Orenya OCR Bot")
+        root.title("Orenya Answer Bot")
         root.geometry("760x500")
         root.minsize(620, 380)
         root.protocol("WM_DELETE_WINDOW", self.close)
@@ -140,4 +140,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
