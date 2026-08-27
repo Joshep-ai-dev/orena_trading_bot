@@ -76,9 +76,12 @@ After Claude finishes, answers map to the detected Orenya sections as follows: A
 B to the second, C to the third, D to the fourth, and any other text to the first. The selected
 item and click coordinates are printed in the console.
 
-The submit-button position is detected by searching the lower half near the area's right edge
+The submit-button position is detected by searching near the area's right edge
 minus 120 pixels for a color cluster similar to `#F79346` (with rendering tolerance). Its
 detected center is printed and clicked after a valid answer item is selected.
+Submit-button color searches are restricted to screen Y coordinates 450 through 900 pixels.
+The detector requires a dense filled-color cluster, so a selected answer's thin orange outline is
+not mistaken for the filled **Submit answer** button.
 
 After selecting an answer, the bot clicks the detected submit button. In F7 repeat mode it waits
 while the button is inactive/background `#080C09`, then rescans for the moved submit control using

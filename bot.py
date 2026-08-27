@@ -277,16 +277,25 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
 
 
 def find_color_cluster(
-    region: list[int], color: tuple[int, int, int], left: int, right: int, tolerance: int = 45
+    region: list[int],
+    color: tuple[int, int, int],
+    left: int,
+    right: int,
+    tolerance: int = 45,
+    screen_y_min: int = 450,
+    screen_y_max: int = 900,
 ) -> tuple[int, int] | None:
-    """Find the center of the bottom-most matching cluster in the lower half."""
+    """Find the bottom-most color cluster within the requested screen-Y range."""
     pixels = np.asarray(capture_raw(region), dtype=np.int16)
     height, width = pixels.shape[:2]
     target_color = np.array(color, dtype=np.int16)
     left = max(0, min(width - 1, left))
     right = max(left + 1, min(width, right))
-    top = height // 2
-    strip = pixels[top:height, left:right]
+    top = max(0, screen_y_min - region[1])
+    bottom = min(height, screen_y_max - region[1] + 1)
+    if top >= bottom:
+        return None
+    strip = pixels[top:bottom, left:right]
     # Treat nearby rendered shades as the same button color. Browser gradients,
     # display scaling, and antialiasing commonly shift RGB channels slightly.
     distance = np.max(np.abs(strip - target_color), axis=2)
@@ -294,13 +303,18 @@ def find_color_cluster(
 
     # Locate the lowest substantial orange band, then use the bounding-box
     # center of its pixels instead of assuming one exact x coordinate.
-    matching_rows = np.flatnonzero(np.count_nonzero(matching, axis=1) >= 3)
+    # A submit button is a filled color block. Requiring several matching
+    # pixels per row rejects thin orange outlines around selected answers.
+    minimum_row_pixels = max(12, min(30, (right - left) // 20))
+    matching_rows = np.flatnonzero(
+        np.count_nonzero(matching, axis=1) >= minimum_row_pixels
+    )
     runs = grouped_rows(matching_rows, maximum_gap=2)
     if not runs:
         return None
     start, end = runs[-1]
     ys, xs = np.nonzero(matching[start:end + 1])
-    if len(xs) < 6:
+    if len(xs) < 100:
         return None
     local_x = (int(xs.min()) + int(xs.max())) // 2
     local_y = start + (int(ys.min()) + int(ys.max())) // 2
@@ -308,13 +322,8 @@ def find_color_cluster(
 
 
 def find_orenya_submit(region: list[int]) -> tuple[int, int] | None:
-    """Find #F79346 near right-120, then retry globally if the button moved."""
-    width = region[2]
-    expected_x = max(0, width - 120)
-    position = find_color_cluster(
-        region, (0xF7, 0x93, 0x46), expected_x - 100, expected_x + 101
-    )
-    return position or find_color_cluster(region, (0xF7, 0x93, 0x46), 0, width)
+    """Find the moved #F79346 submit control across the configured area width."""
+    return find_color_cluster(region, (0xF7, 0x93, 0x46), 0, region[2])
 
 
 def find_orenya_ready_submit(region: list[int]) -> tuple[int, int] | None:
