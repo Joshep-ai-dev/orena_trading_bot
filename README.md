@@ -38,10 +38,28 @@ The coordinates are saved in `config.json`. Run setup again after moving/resizin
 py bot.py
 ```
 
-- **F7** — run one capture/OCR/paste cycle
+- **F7** — repeat capture, answer, and submit cycles until F10
 - **F8** — run one capture/OCR/paste cycle
 - **F9** — select the area and Claude box again
 - **F10** — quit
+
+Each capture scans the Orenya area using background color `#050806` and prints the detected
+answer-section positions. Each position uses the area's right edge minus 10 pixels and the
+section's vertical center.
+
+The primary boundary detector uses separator color `#0F1511` between adjacent answer items.
+
+After Claude finishes, answers map to the detected Orenya sections as follows: A to the first,
+B to the second, C to the third, D to the fourth, and any other text to the first. The selected
+item and click coordinates are printed in the console.
+
+The submit-button position is detected by searching the lower half near the area's right edge
+minus 120 pixels for a color cluster similar to `#F79346` (with rendering tolerance). Its
+detected center is printed and clicked after a valid answer item is selected.
+
+After selecting an answer, the bot clicks the detected submit button. In F7 repeat mode it waits
+while the button is inactive/background `#080C09`, then rescans for the moved submit control using
+color `#774E29`. When found, it prints the new position and starts the next cycle. Press F10 to stop.
 
 For a single capture/paste without the hotkey loop:
 
