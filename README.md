@@ -41,8 +41,8 @@ python bot.py --once
 ```
 
 The bot selects browser text by clicking near the region's top-left, Shift-clicking near its
-bottom-left, and copying. It prints the extracted query, answer list, TF-IDF scores, selected
-answer, item coordinates, and submit coordinates.
+bottom-left, and copying. Runtime logs are limited to selections, clicks, waits, retries, and
+errors. After clicking Submit, the mouse moves 300 pixels left while keeping the same Y position.
 
 Answer sections are found using item color `#080C09` and `#0F1511` boundaries; each item is clicked
 at its detected rectangle center. The filled Submit button is found dynamically between screen Y

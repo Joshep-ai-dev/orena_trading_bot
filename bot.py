@@ -324,24 +324,10 @@ def show_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
     global last_first_item
     positions = find_orenya_sections(region)
     if not positions:
-        print("Orenya sections: none detected.", flush=True)
         if last_first_item:
-            print(
-                f"Using cached first item: x={last_first_item[0]}, y={last_first_item[1]}",
-                flush=True,
-            )
             positions = [last_first_item]
     else:
         last_first_item = positions[0]
-        print(f"Orenya sections ({len(positions)}):", flush=True)
-        for index, (x, y) in enumerate(positions):
-            label = chr(ord("A") + index) if index < 26 else str(index + 1)
-            print(f"  {label}: x={x}, y={y}", flush=True)
-    submit = find_orenya_submit(region)
-    if submit:
-        print(f"Orenya submit: x={submit[0]}, y={submit[1]}", flush=True)
-    else:
-        print("Orenya submit: #F79346 cluster not found near area right-120.", flush=True)
     return positions
 
 
@@ -371,16 +357,6 @@ def extract_answer_list(text: str) -> list[tuple[str, str]]:
         r"(?ms)^\s*([A-D])[.):]\s*(.*?)(?=^\s*[A-D][.):]\s|\Z)", text
     )
     return [(label.upper(), " ".join(value.split())) for label, value in matches]
-
-
-def show_answer_list(text: str) -> None:
-    answers = extract_answer_list(text)
-    if not answers:
-        print("Orenya answer list: no labeled A-D entries found.", flush=True)
-        return
-    print(f"Orenya answer list ({len(answers)}):", flush=True)
-    for label, value in answers:
-        print(f"  {label}: {value}", flush=True)
 
 
 STOP_WORDS = {
@@ -495,7 +471,12 @@ def click_orenya_submit(region: list[int]) -> tuple[int, int] | None:
         print("Cannot click submit: no color similar to #F79346 was found.", flush=True)
         return None
     pyautogui.click(*position)
-    print(f"Orenya submit clicked: x={position[0]}, y={position[1]}", flush=True)
+    moved_x = max(0, position[0] - 300)
+    pyautogui.moveTo(moved_x, position[1], duration=0.15)
+    print(
+        f"Submit clicked: x={position[0]}, y={position[1]}; mouse moved to x={moved_x}",
+        flush=True,
+    )
     return position
 
 
@@ -503,14 +484,11 @@ def wait_for_next_orenya(region: list[int], submitted_at: tuple[int, int]) -> bo
     """Wait for #080C09, then refind the moved #774E29 submit control."""
     inactive = np.array([0x08, 0x0C, 0x09], dtype=np.int16)
     saw_inactive = False
-    print("Waiting for Orenya submit button to become inactive...", flush=True)
     deadline = time.monotonic() + 20.0
     while not stop_requested.is_set():
         color = np.array(pyautogui.pixel(*submitted_at), dtype=np.int16)
         if np.max(np.abs(color - inactive)) <= 20:
-            if not saw_inactive:
-                print("Orenya background is #080C09; waiting...", flush=True)
-                saw_inactive = True
+            saw_inactive = True
         if find_orenya_submit(region) is None:
             break
         if time.monotonic() >= deadline:
@@ -526,16 +504,10 @@ def wait_for_next_orenya(region: list[int], submitted_at: tuple[int, int]) -> bo
         if stop_requested.wait(5.0):
             return False
 
-    print("Refinding moved submit button with color similar to #774E29...", flush=True)
     deadline = time.monotonic() + 20.0
     while not stop_requested.is_set():
         ready_position = find_orenya_ready_submit(region)
         if ready_position is not None:
-            print(
-                f"Orenya ready submit found: x={ready_position[0]}, y={ready_position[1]}; "
-                "starting the next F7 cycle.",
-                flush=True,
-            )
             return True
         if time.monotonic() >= deadline:
             print("No Orenya ready-state change for 20 seconds; restarting F7.", flush=True)
@@ -547,24 +519,17 @@ def wait_for_next_orenya(region: list[int], submitted_at: tuple[int, int]) -> bo
 def run_once(config: dict) -> tuple[int, int] | str | None:
     if not wait_for_daily_schedule():
         return None
-    print("Reading Orenya...", flush=True)
     positions = show_orenya_sections(config["region"])
     text = copy_orenya_text(config["region"])
     if not text:
         print("Selected Orenya text is empty; restarting the F7 workflow.", flush=True)
         return RATE_LIMIT_RETRY
-    show_answer_list(text)
     if "rate limit exceeded" in text.casefold():
         print("Orenya text contains 'Rate limit exceeded'.", flush=True)
         return RATE_LIMIT_RETRY if pause_for_rate_limit() else None
-    query = extract_query(text)
     selected, scores = choose_local_answer(text)
-    print(f"Shopping query: {query or '(not found)'}", flush=True)
-    if scores:
-        print("Local TF-IDF scores:", flush=True)
-        for label, score in scores:
-            print(f"  {label}: {score:.4f}", flush=True)
-    print(f"Local model selected: {selected}", flush=True)
+    best_score = dict(scores).get(selected, 0.0)
+    print(f"Selected answer: {selected} (score={best_score:.4f})", flush=True)
     if not wait_for_daily_schedule():
         return None
     if click_orenya_answer(selected, positions):
