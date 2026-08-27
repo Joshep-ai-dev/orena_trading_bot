@@ -366,6 +366,44 @@ def recognize(image: Image.Image) -> str:
     return "\n".join(lines)
 
 
+def copy_orenya_text(region: list[int]) -> str:
+    """Select the Orenya region as browser text and return the clipboard value."""
+    left, top, _width, height = region
+    top_left = (left + 5, top + 5)
+    bottom_left = (left + 5, top + height - 5)
+    pyperclip.copy("")
+    pyautogui.click(*top_left)
+    time.sleep(0.1)
+    pyautogui.keyDown("shift")
+    try:
+        pyautogui.click(*bottom_left)
+    finally:
+        pyautogui.keyUp("shift")
+    time.sleep(0.1)
+    pyautogui.hotkey("ctrl", "c")
+    time.sleep(0.2)
+    return pyperclip.paste().strip()
+
+
+def extract_answer_list(text: str) -> list[tuple[str, str]]:
+    """Extract multiline A/B/C/D entries from selected Orenya page text."""
+    text = re.split(r"(?im)^\s*(?:Submit answer|Skip)\s*$", text, maxsplit=1)[0]
+    matches = re.findall(
+        r"(?ms)^\s*([A-D])[.):]\s*(.*?)(?=^\s*[A-D][.):]\s|\Z)", text
+    )
+    return [(label.upper(), " ".join(value.split())) for label, value in matches]
+
+
+def show_answer_list(text: str) -> None:
+    answers = extract_answer_list(text)
+    if not answers:
+        print("Orenya answer list: no labeled A-D entries found.", flush=True)
+        return
+    print(f"Orenya answer list ({len(answers)}):", flush=True)
+    for label, value in answers:
+        print(f"  {label}: {value}", flush=True)
+
+
 def rgb_hex(rgb) -> str:
     return "#{:02X}{:02X}{:02X}".format(*rgb)
 
@@ -515,10 +553,11 @@ def wait_for_next_orenya(region: list[int], submitted_at: tuple[int, int]) -> bo
 def run_once(config: dict) -> tuple[int, int] | str | None:
     print("Capturing...", flush=True)
     positions = show_orenya_sections(config["region"])
-    text = recognize(capture(config["region"]))
+    text = copy_orenya_text(config["region"])
     if not text:
-        print("Orenya question text is empty; restarting the F7 workflow.", flush=True)
+        print("Selected Orenya text is empty; restarting the F7 workflow.", flush=True)
         return RATE_LIMIT_RETRY
+    show_answer_list(text)
     if "rate limit exceeded" in text.casefold():
         print("Orenya OCR contains 'Rate limit exceeded'.", flush=True)
         return RATE_LIMIT_RETRY if pause_for_rate_limit() else None

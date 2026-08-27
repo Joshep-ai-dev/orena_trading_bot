@@ -99,6 +99,10 @@ Empty OCR text from either Orenya or Claude also restarts the F7 workflow.
 If Orenya OCR contains `Rate limit exceeded`, the bot waits 1 hour and 1 minute without sending
 the text to Claude, then continues automatically.
 
+Orenya question text is copied without OCR: the bot clicks the configured area's top-left point,
+Shift-clicks its bottom-left point, copies the browser selection, and prints labeled A-D answers
+in the console. Claude response reading still uses OCR.
+
 For a single capture/paste without the hotkey loop:
 
 ```powershell
