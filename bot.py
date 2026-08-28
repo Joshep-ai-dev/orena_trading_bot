@@ -197,7 +197,7 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
             center_x = (left_edge + right_edge) // 2
         else:
             center_x = width // 2
-        return region[0] + center_x, region[1] - 5 +  (top_edge + bottom_edge) // 2
+        return region[0] + center_x, region[1]  +  (top_edge + bottom_edge) // 2
 
     # Primary separator method: #0F1511 is the horizontal color between items.
     separator = np.array([0x0F, 0x15, 0x11], dtype=np.int16)
