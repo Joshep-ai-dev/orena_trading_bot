@@ -51,7 +51,10 @@ is not fixed. Repeat mode waits for `#080C09`, pauses five seconds, and
 then refinds the moved `#774E29` control before continuing.
 
 Before an answer position is returned, its center pixel is checked for exact color `#050806`.
-If necessary, the detector moves it to the nearest matching pixel within a 5-pixel radius.
+If necessary, the detector moves it to the nearest matching pixel within a 30-pixel radius.
+
+Repeat mode reuses text already selected for the next-screen rate-limit check, avoiding a second
+Shift-click selection of the same task.
 
 F7 completes answer selection and submission first, then checks the next result. If that next
 result contains `Rate limit exceeded`, it waits 10 minutes before starting the next complete F7

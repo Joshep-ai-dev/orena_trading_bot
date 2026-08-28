@@ -190,7 +190,7 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
     bright = np.max(pixels, axis=2) >= 150
 
     def snap_to_click_color(position: tuple[int, int]) -> tuple[int, int]:
-        """Move a center to the nearest exact #050806 pixel within 5 px."""
+        """Move a center to the nearest exact #050806 pixel within 30 px."""
         local_x = position[0] - region[0]
         local_y = position[1] - region[1]
         target = np.array([0x05, 0x08, 0x06], dtype=np.int16)
@@ -200,9 +200,9 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
         offsets = sorted(
             (
                 (dx * dx + dy * dy, dx, dy)
-                for dy in range(-5, 6)
-                for dx in range(-5, 6)
-                if dx * dx + dy * dy <= 25
+                for dy in range(-30, 31)
+                for dx in range(-30, 31)
+                if dx * dx + dy * dy <= 900
             ),
             key=lambda value: value[0],
         )
@@ -544,11 +544,11 @@ def wait_for_next_orenya(region: list[int], submitted_at: tuple[int, int]) -> bo
     return False
 
 
-def run_once(config: dict) -> tuple[int, int] | str | None:
+def run_once(config: dict, prefetched_text: str | None = None) -> tuple[int, int] | str | None:
     if not wait_for_daily_schedule():
         return None
     positions = show_orenya_sections(config["region"])
-    text = copy_orenya_text(config["region"])
+    text = prefetched_text if prefetched_text is not None else copy_orenya_text(config["region"])
     if not text:
         print("Selected Orenya text is empty; restarting the F7 workflow.", flush=True)
         return RATE_LIMIT_RETRY
@@ -566,10 +566,12 @@ def run_once(config: dict) -> tuple[int, int] | str | None:
 
 
 def run_repeating(config: dict) -> None:
+    prefetched_text: str | None = None
     while not stop_requested.is_set():
         if not wait_for_daily_schedule():
             return
-        submitted_at = run_once(config)
+        submitted_at = run_once(config, prefetched_text)
+        prefetched_text = None
         if submitted_at == RATE_LIMIT_RETRY:
             continue
         if not submitted_at:
@@ -581,6 +583,10 @@ def run_repeating(config: dict) -> None:
             print("Next result is rate-limited.", flush=True)
             if not pause_for_rate_limit():
                 return
+        else:
+            # The next task was already selected for the rate-limit check. Reuse
+            # it once instead of performing the same Shift-click selection again.
+            prefetched_text = next_text
 
 
 def main() -> int:
