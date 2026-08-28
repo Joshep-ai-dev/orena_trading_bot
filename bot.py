@@ -626,59 +626,76 @@ def wait_for_next_orenya(region: list[int]) -> bool:
     return False
 
 
-def run_once(config: dict, prefetched_text: str | None = None) -> tuple[int, int] | str | None:
-    global expected_answer_count
+def run_once(config: dict | None = None, prefetched_task=None):
+    """Read, choose, select, and submit using UI Automation only."""
     if not wait_for_daily_schedule():
         return None
-    text = prefetched_text if prefetched_text is not None else copy_orenya_text(config["region"])
-    if not text:
-        print("Selected Orenya text is empty; restarting the F7 workflow.", flush=True)
+    from orenya_window import read_task, select_answer, submit_answer
+    task = prefetched_task if prefetched_task is not None else read_task()
+    if not task.answers:
+        print("No A/B/C/D answers are exposed in Orenya's UI Automation tree; retrying.", flush=True)
         return RATE_LIMIT_RETRY
-    answers = extract_answer_list(text)
-    expected_answer_count = len(answers) or None
-    positions = show_orenya_sections(config["region"])
-    if answers and len(positions) != len(answers):
-        print(
-            f"Answer-position mismatch: text has {len(answers)} items, screen has {len(positions)}; "
-            "nothing clicked.",
-            flush=True,
-        )
-        return RATE_LIMIT_RETRY
-    selected, scores = choose_local_answer(text)
+    query = extract_query(task.text)
+    model_text = "\n".join([query] + [f"{label}. {value}" for label, value in task.answers])
+    selected, scores = choose_local_answer(model_text)
     best_score = dict(scores).get(selected, 0.0)
     print(f"Selected answer: {selected} (score={best_score:.4f})", flush=True)
     if not wait_for_daily_schedule():
         return None
-    if click_orenya_answer(selected, positions):
-        time.sleep(0.2)
-        if not wait_for_daily_schedule():
-            return None
-        return click_orenya_submit(config["region"])
+    action = select_answer(selected, task)
+    print(f"Answer {selected} selected through UIA {action}Pattern.", flush=True)
+    if stop_requested.wait(0.2) or not wait_for_daily_schedule():
+        return None
+    deadline = time.monotonic() + 20.0
+    while not stop_requested.is_set():
+        try:
+            submit_action = submit_answer()
+            print(f"Submit invoked through UIA {submit_action}Pattern.", flush=True)
+            return task.signature
+        except RuntimeError as exc:
+            if time.monotonic() >= deadline:
+                print(f"Cannot submit through UI Automation: {exc}", flush=True)
+                return None
+            stop_requested.wait(0.1)
     return None
 
 
-def run_repeating(config: dict) -> None:
-    prefetched_text: str | None = None
+def _wait_for_next_uia(old_signature):
+    """Wait until UIA exposes a new task or a rate-limit result."""
+    from orenya_window import read_task
+    print("Waiting for the next UI Automation task...", flush=True)
+    while not stop_requested.is_set():
+        try:
+            task = read_task()
+            if task.rate_limited or (task.answers and task.signature != old_signature):
+                return task
+        except RuntimeError:
+            pass
+        stop_requested.wait(0.2)
+    return None
+
+
+def run_repeating(config: dict | None = None) -> None:
+    prefetched_task = None
     while not stop_requested.is_set():
         if not wait_for_daily_schedule():
             return
-        submitted_at = run_once(config, prefetched_text)
-        prefetched_text = None
-        if submitted_at == RATE_LIMIT_RETRY:
+        old_signature = run_once(config, prefetched_task)
+        prefetched_task = None
+        if old_signature == RATE_LIMIT_RETRY:
+            stop_requested.wait(0.2)
             continue
-        if not submitted_at:
+        if not old_signature:
             return
-        if not wait_for_next_orenya(config["region"]):
+        next_task = _wait_for_next_uia(old_signature)
+        if next_task is None:
             return
-        next_text = copy_orenya_text(config["region"])
-        if "rate limit exceeded" in next_text.casefold():
+        if next_task.rate_limited:
             print("Next result is rate-limited.", flush=True)
             if not pause_for_rate_limit():
                 return
         else:
-            # The next task was already selected for the rate-limit check. Reuse
-            # it once instead of performing the same Shift-click selection again.
-            prefetched_text = next_text
+            prefetched_task = next_task
 
 
 def main() -> int:
@@ -686,15 +703,21 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--setup", action="store_true", help="select the Orenya task region")
     parser.add_argument("--once", action="store_true", help="choose and submit once, then quit")
+    parser.add_argument("--inspect-window", action="store_true", help="list Orenya UI Automation objects")
     args = parser.parse_args()
+    if args.inspect_window:
+        from orenya_window import print_objects
+        try:
+            print_objects()
+            return 0
+        except RuntimeError as exc:
+            print(exc, file=sys.stderr)
+            return 3
     if args.setup:
         setup()
         return 0
-    try:
-        config = load_config()
-    except (OSError, ValueError, json.JSONDecodeError) as exc:
-        print(exc, file=sys.stderr)
-        return 2
+    # UI Automation discovers Orenya and its controls dynamically.
+    config = {}
     if args.once:
         while not stop_requested.is_set():
             if run_once(config) != RATE_LIMIT_RETRY:

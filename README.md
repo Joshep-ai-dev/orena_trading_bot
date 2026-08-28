@@ -1,8 +1,8 @@
 # Orenya Local Answer Bot
 
-This Windows bot copies selectable text from an Orenya task, ranks its A–D choices locally with
-a lightweight TF-IDF/cosine text model, clicks the best match, and submits it. It does not use
-OCR, a network API, or an external AI service.
+This Windows bot reads an Orenya task through Windows UI Automation, ranks its A-D choices locally
+with a lightweight TF-IDF/cosine text model, selects the best match, and invokes Submit. It does
+not use OCR, screenshots, colors, mouse coordinates, a network API, or an external AI service.
 
 ## Install
 
@@ -12,27 +12,16 @@ python -m venv .venv
 python -m pip install -r requirements.txt
 ```
 
-## Setup
-
-Display the complete Orenya task and run:
-
-```powershell
-python bot.py --setup
-```
-
-Drag one rectangle around the task, including the query, all answer choices, and Submit button.
-The region is saved in `config.json`.
-
 ## Run
 
 ```powershell
 python bot.py
 ```
 
-- **F7** — repeat choosing and submitting until F10.
-- **F8** — choose and submit once.
-- **F9** — select the Orenya region again.
-- **F10** — stop.
+- **F7** - repeat choosing and submitting until F10.
+- **F8** - choose and submit once.
+- **F9** - legacy screen-region setup; F7/F8 do not use it.
+- **F10** - stop.
 
 For one cycle without the hotkey loop:
 
@@ -40,36 +29,13 @@ For one cycle without the hotkey loop:
 python bot.py --once
 ```
 
-The bot selects browser text by clicking near the region's top-left, Shift-clicking near its
-bottom-left, and copying. Runtime logs are limited to selections, clicks, waits, retries, and
-errors. After clicking Submit, the mouse moves 300 pixels left while keeping the same Y position.
+The runtime finds the inactive Orenya HWND, reads named accessibility elements, identifies A-D
+answer controls, performs their Selection/Invoke action, and invokes the enabled `Submit answer`
+control. It waits for the accessibility-tree answer signature to change before processing the next
+task. Orenya is not activated and the physical mouse is not moved.
 
-<<<<<<< HEAD
-Answer cards are primarily found from their wide `#050806` interiors, with `#0F1511` boundaries
-as fallback. Text is parsed first so the detected card count must match the A-D answer count before
-anything is clicked. Each item is clicked at its detected rectangle center. Submit is searched below the last item's center and near the
-=======
-Answer sections are found using item color `#080C09` and `#0F1511` boundaries; each item is clicked
-at its detected rectangle center. Submit is searched below the last item's center and near the
->>>>>>> 87673944444356e10849f6bc98c5a485f1b8c5a4
-area's right edge. Only its enabled bright `#F79346` state is clickable; the brown `#774E29`
-disabled state is never submitted. After clicking, repeat mode waits until the entire old Submit
-area disappears. It then re-detects the next task's answer layout and waits until a new bright or
-brown Submit area appears below the new last item before continuing.
-
-Before an answer position is returned, its center pixel is checked for exact color `#050806`.
-If necessary, the detector moves it to the nearest matching pixel within a 30-pixel radius.
-
-Repeat mode reuses text already selected for the next-screen rate-limit check, avoiding a second
-Shift-click selection of the same task.
-
-After Shift-click selection, the bot waits 1 ms, copies, and polls the clipboard for up to 500 ms.
-If visual detection finds extra card-like panels, every detector path keeps only the last expected
-number of A-D rectangles before Submit.
-
-F7 completes answer selection and submission first, then checks the next result. If that next
-result contains `Rate limit exceeded`, it waits 10 minutes before starting the next complete F7
-cycle. Empty selected text retries.
+F7 completes answer selection and submission, then examines the next UIA result. If it contains
+`Rate limit exceeded`, the bot waits 10 minutes and starts the complete F7 cycle again.
 
 Automation pauses every day from 07:59:58 through 08:59:59 in GMT+9 and resumes at 09:00:00.
 F10 can stop the bot during this scheduled pause.
@@ -80,9 +46,21 @@ F10 can stop the bot during this scheduled pause.
 python gui.py
 ```
 
-The interface provides Setup, Start Repeat, Run Once, Stop, and a live log.
-Minimizing the window hides it to a system-tray icon. The bot and global F7/F8/F9/F10 hotkeys
-continue working while the window is hidden or inactive. Use the tray menu to show or exit it.
+The interface provides Start Repeat, Run Once, Stop, inspection, and a live log. Minimizing it hides
+it to a system-tray icon. The bot and global hotkeys continue working while its GUI is inactive.
+
+**Inspect Orenya** attaches to the top-level `Orenya Commerce Agent` window and prints every object
+Electron publishes to Windows UI Automation, including invisible, off-screen, and zero-rectangle
+nodes. The same inspection is available from:
+
+```powershell
+python bot.py --inspect-window
+```
+
+Inactive and minimized Orenya windows can be inspected without foreground activation. If Orenya
+closes its UI and leaves only background processes, there is no HWND or accessibility tree until
+it opens a window again. Controls not published by Electron's accessibility tree cannot be read or
+invoked by Windows UI Automation.
 
 ## Build a Windows executable
 
@@ -91,4 +69,4 @@ python -m pip install -r requirements-build.txt
 python -m PyInstaller --noconfirm --clean --onefile --windowed --name OrenyaBot gui.py
 ```
 
-The executable is created at `dist\OrenyaBot.exe`. Its `config.json` is stored beside the EXE.
+The executable is created at `dist\OrenyaBot.exe`.

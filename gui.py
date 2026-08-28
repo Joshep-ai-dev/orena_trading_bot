@@ -9,6 +9,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import bot
+import orenya_window
 from PIL import Image, ImageDraw
 from pynput import keyboard
 import pystray
@@ -47,6 +48,7 @@ class BotApp:
         ttk.Button(controls, text="Start Repeat (F7)", command=self.start_repeat).pack(side="left", padx=8)
         ttk.Button(controls, text="Run Once (F8)", command=self.run_once).pack(side="left", padx=8)
         ttk.Button(controls, text="Stop (F10)", command=self.stop).pack(side="left", padx=8)
+        ttk.Button(controls, text="Inspect Orenya", command=self.inspect_orenya).pack(side="left", padx=8)
 
         self.status = tk.StringVar(value="Ready")
         ttk.Label(root, textvariable=self.status, padding=(12, 0, 12, 8)).pack(fill="x")
@@ -125,9 +127,8 @@ class BotApp:
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("Bot running", "Stop the current task before starting another.")
             return
-        config = self.config()
-        if not config:
-            return
+        # F7/F8 use UI Automation and require no screen-region configuration.
+        config = {}
         bot.stop_requested.clear()
         self.status.set(label)
 
@@ -172,6 +173,12 @@ class BotApp:
         bot.stop_requested.set()
         self.status.set("Stopping...")
         print("Stop requested.", flush=True)
+
+    def inspect_orenya(self) -> None:
+        try:
+            orenya_window.print_objects()
+        except Exception as exc:
+            print(f"Orenya inspection failed: {exc}", flush=True)
 
     def drain_messages(self) -> None:
         chunks: list[str] = []
