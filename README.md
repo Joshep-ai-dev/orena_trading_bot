@@ -45,9 +45,9 @@ bottom-left, and copying. Runtime logs are limited to selections, clicks, waits,
 errors. After clicking Submit, the mouse moves 300 pixels left while keeping the same Y position.
 
 Answer sections are found using item color `#080C09` and `#0F1511` boundaries; each item is clicked
-at its detected rectangle center. The filled Submit button is searched from the last item's bottom
-edge through +100 px, and horizontally between the area's right−200 and right−100 offsets. A color
-similar to `#F79346` is clicked at its cluster center. Repeat mode waits for `#080C09`, pauses five seconds, and
+at its detected rectangle center. Submit is searched below the last item's center and near the
+area's right edge. Both its bright `#F79346` and brown `#774E29` states are recognized and clicked
+at the detected cluster center. Repeat mode waits for `#080C09`, pauses five seconds, and
 then refinds the moved `#774E29` control before continuing.
 
 Before an answer position is returned, its center pixel is checked for exact color `#050806`.

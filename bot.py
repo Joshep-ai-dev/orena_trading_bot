@@ -36,6 +36,7 @@ events: queue.Queue[str] = queue.Queue()
 stop_requested = threading.Event()
 last_first_item: tuple[int, int] | None = None
 last_question_bottom: int | None = None
+last_question_center_y: int | None = None
 RATE_LIMIT_RETRY = "__RATE_LIMIT_RETRY__"
 GMT_PLUS_9 = timezone(timedelta(hours=9))
 
@@ -182,8 +183,9 @@ def grouped_rows(rows: np.ndarray, maximum_gap: int = 3) -> list[tuple[int, int]
 
 def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
     """Locate bordered answer sections and return screen click positions."""
-    global last_question_bottom
+    global last_question_bottom, last_question_center_y
     last_question_bottom = None
+    last_question_center_y = None
     pixels = np.asarray(capture_raw(region), dtype=np.int16)
     height, width = pixels.shape[:2]
     background = np.array([0x05, 0x08, 0x06], dtype=np.int16)
@@ -221,9 +223,12 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
         return [snap_to_click_color(position) for position in positions]
 
     def finish(positions: list[tuple[int, int]], bottom_edge: int) -> list[tuple[int, int]]:
-        global last_question_bottom
+        global last_question_bottom, last_question_center_y
         last_question_bottom = region[1] + bottom_edge
-        return corrected(positions)
+        result = corrected(positions)
+        if result:
+            last_question_center_y = result[-1][1]
+        return result
 
     def item_center(top_edge: int, bottom_edge: int) -> tuple[int, int]:
         """Return the center of the #080C09 item pixels within two boundaries."""
@@ -357,29 +362,39 @@ def find_color_cluster(
 
 
 def find_orenya_submit(region: list[int]) -> tuple[int, int] | None:
-    """Find #F79346 below the last item and near the area's right edge."""
-    if last_question_bottom is not None:
-        return find_color_cluster(
-            region,
-            (0xF7, 0x93, 0x46),
-            region[2] - 200,
-            region[2] - 100,
-            screen_y_min=last_question_bottom,
-            screen_y_max=last_question_bottom + 100,
+    """Find the bright or brown Submit button below the last answer item."""
+    if last_question_center_y is not None:
+        y_min = last_question_center_y + 10
+        y_max = last_question_center_y + 180
+        left, right = region[2] - 230, region[2] - 70
+    elif last_question_bottom is not None:
+        y_min, y_max = last_question_bottom, last_question_bottom + 140
+        left, right = region[2] - 230, region[2] - 70
+    else:
+        y_min, y_max = 450, 900
+        left, right = 0, region[2]
+
+    # Enabled buttons are bright orange; the same control is brown while its
+    # state is changing or before selection. Both occupy the same layout slot.
+    return (
+        find_color_cluster(
+            region, (0xF7, 0x93, 0x46), left, right,
+            screen_y_min=y_min, screen_y_max=y_max,
         )
-    return find_color_cluster(region, (0xF7, 0x93, 0x46), 0, region[2])
+        or find_color_cluster(
+            region, (0x77, 0x4E, 0x29), left, right,
+            screen_y_min=y_min, screen_y_max=y_max,
+        )
+    )
 
 
 def find_orenya_ready_submit(region: list[int]) -> tuple[int, int] | None:
     """Refind the moved submit control by its #774E29 ready-state color."""
-    if last_question_bottom is not None:
+    if last_question_center_y is not None:
         return find_color_cluster(
-            region,
-            (0x77, 0x4E, 0x29),
-            region[2] - 200,
-            region[2] - 100,
-            screen_y_min=last_question_bottom,
-            screen_y_max=last_question_bottom + 100,
+            region, (0x77, 0x4E, 0x29), region[2] - 230, region[2] - 70,
+            screen_y_min=last_question_center_y + 10,
+            screen_y_max=last_question_center_y + 180,
         )
     return find_color_cluster(region, (0x77, 0x4E, 0x29), 0, region[2])
 
