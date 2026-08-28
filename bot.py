@@ -35,6 +35,7 @@ CONFIG_PATH = APP_DIR / "config.json"
 events: queue.Queue[str] = queue.Queue()
 stop_requested = threading.Event()
 last_first_item: tuple[int, int] | None = None
+last_question_bottom: int | None = None
 RATE_LIMIT_RETRY = "__RATE_LIMIT_RETRY__"
 GMT_PLUS_9 = timezone(timedelta(hours=9))
 
@@ -181,6 +182,8 @@ def grouped_rows(rows: np.ndarray, maximum_gap: int = 3) -> list[tuple[int, int]
 
 def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
     """Locate bordered answer sections and return screen click positions."""
+    global last_question_bottom
+    last_question_bottom = None
     pixels = np.asarray(capture_raw(region), dtype=np.int16)
     height, width = pixels.shape[:2]
     background = np.array([0x05, 0x08, 0x06], dtype=np.int16)
@@ -217,6 +220,11 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
     def corrected(positions: list[tuple[int, int]]) -> list[tuple[int, int]]:
         return [snap_to_click_color(position) for position in positions]
 
+    def finish(positions: list[tuple[int, int]], bottom_edge: int) -> list[tuple[int, int]]:
+        global last_question_bottom
+        last_question_bottom = region[1] + bottom_edge
+        return corrected(positions)
+
     def item_center(top_edge: int, bottom_edge: int) -> tuple[int, int]:
         """Return the center of the #080C09 item pixels within two boundaries."""
         ys, xs = np.nonzero(item_mask[top_edge + 1:bottom_edge])
@@ -236,6 +244,7 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
     separator_bands = grouped_rows(separator_rows, maximum_gap=2)
     separator_centers = [(start + end) // 2 for start, end in separator_bands]
     separated_sections: list[tuple[int, int]] = []
+    separated_bottom = 0
     for top_edge, bottom_edge in zip(separator_centers, separator_centers[1:]):
         item_height = bottom_edge - top_edge
         if not 18 <= item_height <= min(220, height):
@@ -245,18 +254,21 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
         if np.count_nonzero(item_mask[top_edge + 1:bottom_edge]) < 20:
             continue
         separated_sections.append(item_center(top_edge, bottom_edge))
+        separated_bottom = bottom_edge
     if len(separated_sections) >= 2:
-        return corrected(separated_sections)
+        return finish(separated_sections, separated_bottom)
 
     # Primary method: try many columns across the right half. Card widths and
     # rounded corners vary, so right-10 may be outside their visible borders.
     # The best column is the one that separates the most text-containing runs.
     best_column_sections: list[tuple[int, int]] = []
+    best_column_bottom = 0
     step = max(2, width // 80)
     for scan_x in range(width - 6, max(0, width // 2), -step):
         background_rows = np.flatnonzero(color_distance[:, scan_x] <= 6)
         background_runs = grouped_rows(background_rows, maximum_gap=1)
         candidate_sections: list[tuple[int, int]] = []
+        candidate_bottom = 0
         for start, end in background_runs:
             run_height = end - start + 1
             if not 18 <= run_height <= min(220, height):
@@ -264,11 +276,13 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
             if np.count_nonzero(bright[start:end + 1]) < 8:
                 continue
             candidate_sections.append(item_center(start, end))
+            candidate_bottom = end
         if len(candidate_sections) > len(best_column_sections):
             best_column_sections = candidate_sections
+            best_column_bottom = candidate_bottom
 
     if len(best_column_sections) >= 2:
-        return corrected(best_column_sections)
+        return finish(best_column_sections, best_column_bottom)
 
     # A section's dark horizontal border spans much more of the row than its text.
     border_rows = np.flatnonzero(np.count_nonzero(color_distance >= 4, axis=1) >= max(20, int(width * 0.70)))
@@ -276,6 +290,7 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
     border_centers = [(start + end) // 2 for start, end in borders]
 
     sections: list[tuple[int, int]] = []
+    sections_bottom = 0
     for top_edge, bottom_edge in zip(border_centers, border_centers[1:]):
         section_height = bottom_edge - top_edge
         if not 18 <= section_height <= min(220, height):
@@ -284,13 +299,16 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
         if np.count_nonzero(bright[top_edge + 1:bottom_edge]) < 8:
             continue
         sections.append(item_center(top_edge, bottom_edge))
+        sections_bottom = bottom_edge
 
     # Remove duplicate centers caused by thick or decorated borders.
     unique: list[tuple[int, int]] = []
     for position in sections:
         if not unique or abs(position[1] - unique[-1][1]) >= 12:
             unique.append(position)
-    return corrected(unique)
+    if unique:
+        return finish(unique, sections_bottom)
+    return []
 
 
 def find_color_cluster(
@@ -339,12 +357,30 @@ def find_color_cluster(
 
 
 def find_orenya_submit(region: list[int]) -> tuple[int, int] | None:
-    """Find the moved #F79346 submit control across the configured area width."""
+    """Find #F79346 below the last item and near the area's right edge."""
+    if last_question_bottom is not None:
+        return find_color_cluster(
+            region,
+            (0xF7, 0x93, 0x46),
+            region[2] - 200,
+            region[2] - 100,
+            screen_y_min=last_question_bottom,
+            screen_y_max=last_question_bottom + 100,
+        )
     return find_color_cluster(region, (0xF7, 0x93, 0x46), 0, region[2])
 
 
 def find_orenya_ready_submit(region: list[int]) -> tuple[int, int] | None:
     """Refind the moved submit control by its #774E29 ready-state color."""
+    if last_question_bottom is not None:
+        return find_color_cluster(
+            region,
+            (0x77, 0x4E, 0x29),
+            region[2] - 200,
+            region[2] - 100,
+            screen_y_min=last_question_bottom,
+            screen_y_max=last_question_bottom + 100,
+        )
     return find_color_cluster(region, (0x77, 0x4E, 0x29), 0, region[2])
 
 
