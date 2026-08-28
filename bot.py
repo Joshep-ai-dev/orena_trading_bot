@@ -362,7 +362,7 @@ def find_color_cluster(
 
 
 def find_orenya_submit(region: list[int]) -> tuple[int, int] | None:
-    """Find the bright or brown Submit button below the last answer item."""
+    """Find only the bright, enabled Submit button below the last answer item."""
     if last_question_center_y is not None:
         y_min = last_question_center_y + 10
         y_max = last_question_center_y + 180
@@ -374,29 +374,10 @@ def find_orenya_submit(region: list[int]) -> tuple[int, int] | None:
         y_min, y_max = 450, 900
         left, right = 0, region[2]
 
-    # Enabled buttons are bright orange; the same control is brown while its
-    # state is changing or before selection. Both occupy the same layout slot.
-    return (
-        find_color_cluster(
-            region, (0xF7, 0x93, 0x46), left, right,
-            screen_y_min=y_min, screen_y_max=y_max,
-        )
-        or find_color_cluster(
-            region, (0x77, 0x4E, 0x29), left, right,
-            screen_y_min=y_min, screen_y_max=y_max,
-        )
+    return find_color_cluster(
+        region, (0xF7, 0x93, 0x46), left, right,
+        screen_y_min=y_min, screen_y_max=y_max,
     )
-
-
-def find_orenya_ready_submit(region: list[int]) -> tuple[int, int] | None:
-    """Refind the moved submit control by its #774E29 ready-state color."""
-    if last_question_center_y is not None:
-        return find_color_cluster(
-            region, (0x77, 0x4E, 0x29), region[2] - 230, region[2] - 70,
-            screen_y_min=last_question_center_y + 10,
-            screen_y_max=last_question_center_y + 180,
-        )
-    return find_color_cluster(region, (0x77, 0x4E, 0x29), 0, region[2])
 
 
 def show_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
@@ -545,9 +526,15 @@ def click_orenya_answer(result_text: str, positions: list[tuple[int, int]]) -> b
 
 
 def click_orenya_submit(region: list[int]) -> tuple[int, int] | None:
-    position = find_orenya_submit(region)
+    deadline = time.monotonic() + 20.0
+    position = None
+    while not stop_requested.is_set() and time.monotonic() < deadline:
+        position = find_orenya_submit(region)
+        if position:
+            break
+        time.sleep(0.1)
     if not position:
-        print("Cannot click submit: no color similar to #F79346 was found.", flush=True)
+        print("Cannot click Submit: enabled #F79346 button was not found within 20 seconds.", flush=True)
         return None
     pyautogui.click(*position)
     moved_x = max(0, position[0] - 300)
@@ -559,40 +546,23 @@ def click_orenya_submit(region: list[int]) -> tuple[int, int] | None:
     return position
 
 
-def wait_for_next_orenya(region: list[int], submitted_at: tuple[int, int]) -> bool:
-    """Wait for #080C09, then refind the moved #774E29 submit control."""
-    inactive = np.array([0x08, 0x0C, 0x09], dtype=np.int16)
-    saw_inactive = False
+def wait_for_next_orenya(region: list[int]) -> bool:
+    """Wait until enabled Submit disappears, then allow the next task to render."""
     deadline = time.monotonic() + 20.0
     while not stop_requested.is_set():
-        color = np.array(pyautogui.pixel(*submitted_at), dtype=np.int16)
-        if np.max(np.abs(color - inactive)) <= 20:
-            saw_inactive = True
         if find_orenya_submit(region) is None:
             break
         if time.monotonic() >= deadline:
-            print("No Orenya state change for 20 seconds; restarting the F7 workflow.", flush=True)
+            print("Submit stayed enabled for 20 seconds; restarting the F7 workflow.", flush=True)
             return True
         time.sleep(0.2)
 
     if stop_requested.is_set():
         return False
 
-    if saw_inactive:
-        print("Inactive background detected; waiting 5 seconds...", flush=True)
-        if stop_requested.wait(5.0):
-            return False
-
-    deadline = time.monotonic() + 20.0
-    while not stop_requested.is_set():
-        ready_position = find_orenya_ready_submit(region)
-        if ready_position is not None:
-            return True
-        if time.monotonic() >= deadline:
-            print("No Orenya ready-state change for 20 seconds; restarting F7.", flush=True)
-            return True
-        time.sleep(0.2)
-    return False
+    if stop_requested.wait(8.0):
+        return False
+    return True
 
 
 def run_once(config: dict, prefetched_text: str | None = None) -> tuple[int, int] | str | None:
@@ -627,7 +597,7 @@ def run_repeating(config: dict) -> None:
             continue
         if not submitted_at:
             return
-        if not wait_for_next_orenya(config["region"], submitted_at):
+        if not wait_for_next_orenya(config["region"]):
             return
         next_text = copy_orenya_text(config["region"])
         if "rate limit exceeded" in next_text.casefold():
