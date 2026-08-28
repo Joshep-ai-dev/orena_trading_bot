@@ -37,6 +37,7 @@ stop_requested = threading.Event()
 last_first_item: tuple[int, int] | None = None
 last_question_bottom: int | None = None
 last_question_center_y: int | None = None
+expected_answer_count: int | None = None
 RATE_LIMIT_RETRY = "__RATE_LIMIT_RETRY__"
 GMT_PLUS_9 = timezone(timedelta(hours=9))
 
@@ -399,33 +400,16 @@ def find_orenya_submit(region: list[int]) -> tuple[int, int] | None:
         y_min, y_max = 450, 900
         left, right = 0, region[2]
 
-    # Enabled buttons are bright orange; the same control is brown while its
-    # state is changing or before selection. Both occupy the same layout slot.
-    return (
-        find_color_cluster(
-            region, (0xF7, 0x93, 0x46), left, right,
-            screen_y_min=y_min, screen_y_max=y_max,
-        )
-        or find_color_cluster(
-            region, (0x77, 0x4E, 0x29), left, right,
-            screen_y_min=y_min, screen_y_max=y_max,
-        )
+    return find_color_cluster(
+        region, (0xF7, 0x93, 0x46), left, right,
+        screen_y_min=y_min, screen_y_max=y_max,
     )
 
 
-def find_orenya_ready_submit(region: list[int]) -> tuple[int, int] | None:
-    """Refind the moved submit control by its #774E29 ready-state color."""
-    if last_question_center_y is not None:
-        return find_color_cluster(
-            region, (0x77, 0x4E, 0x29), region[2] - 230, region[2] - 70,
-            screen_y_min=last_question_center_y + 10,
-            screen_y_max=last_question_center_y + 180,
-        )
-    return find_color_cluster(region, (0x77, 0x4E, 0x29), 0, region[2])
-
-
-def show_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
+def show_orenya_sections(region: list[int], expected_count: int | None = None) -> list[tuple[int, int]]:
     global last_first_item
+    if expected_count is None:
+        expected_count = expected_answer_count
     positions = find_orenya_sections(region, expected_count)
     if not positions:
         if last_first_item:
@@ -610,6 +594,7 @@ def wait_for_next_orenya(region: list[int]) -> bool:
 
 
 def run_once(config: dict, prefetched_text: str | None = None) -> tuple[int, int] | str | None:
+    global expected_answer_count
     if not wait_for_daily_schedule():
         return None
     text = prefetched_text if prefetched_text is not None else copy_orenya_text(config["region"])
@@ -617,7 +602,8 @@ def run_once(config: dict, prefetched_text: str | None = None) -> tuple[int, int
         print("Selected Orenya text is empty; restarting the F7 workflow.", flush=True)
         return RATE_LIMIT_RETRY
     answers = extract_answer_list(text)
-    positions = show_orenya_sections(config["region"], len(answers) or None)
+    expected_answer_count = len(answers) or None
+    positions = show_orenya_sections(config["region"])
     if answers and len(positions) != len(answers):
         print(
             f"Answer-position mismatch: text has {len(answers)} items, screen has {len(positions)}; "
