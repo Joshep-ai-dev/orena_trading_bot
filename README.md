@@ -63,6 +63,10 @@ If necessary, the detector moves it to the nearest matching pixel within a 30-pi
 Repeat mode reuses text already selected for the next-screen rate-limit check, avoiding a second
 Shift-click selection of the same task.
 
+After Shift-click selection, the bot waits 1 ms, copies, and polls the clipboard for up to 500 ms.
+If visual detection finds extra card-like panels, every detector path keeps only the last expected
+number of A-D rectangles before Submit.
+
 F7 completes answer selection and submission first, then checks the next result. If that next
 result contains `Rate limit exceeded`, it waits 10 minutes before starting the next complete F7
 cycle. Empty selected text retries.

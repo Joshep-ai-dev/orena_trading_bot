@@ -225,6 +225,10 @@ def find_orenya_sections(region: list[int], expected_count: int | None = None) -
 
     def finish(positions: list[tuple[int, int]], bottom_edge: int) -> list[tuple[int, int]]:
         global last_question_bottom, last_question_center_y
+        if expected_count and len(positions) > expected_count:
+            # Headers/panels can resemble an answer card. Answers are the last
+            # expected_count card-shaped regions before the Submit row.
+            positions = positions[-expected_count:]
         last_question_bottom = region[1] + bottom_edge
         result = corrected(positions)
         if result:
@@ -453,10 +457,15 @@ def copy_orenya_text(region: list[int]) -> str:
         pyautogui.click(*bottom_right)
     finally:
         pyautogui.keyUp("shift")
-    time.sleep(0.1)
+    time.sleep(0.001)
     pyautogui.hotkey("ctrl", "c")
-    time.sleep(0.2)
-    return pyperclip.paste().strip()
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        text = pyperclip.paste().strip()
+        if text:
+            return text
+        time.sleep(0.01)
+    return ""
 
 
 def extract_answer_list(text: str) -> list[tuple[str, str]]:
