@@ -67,6 +67,8 @@ python gui.py
 ```
 
 The interface provides Setup, Start Repeat, Run Once, Stop, and a live log.
+Minimizing the window hides it to a system-tray icon. The bot and global F7/F8/F9/F10 hotkeys
+continue working while the window is hidden or inactive. Use the tray menu to show or exit it.
 
 ## Build a Windows executable
 

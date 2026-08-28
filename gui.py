@@ -9,6 +9,9 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 import bot
+from PIL import Image, ImageDraw
+from pynput import keyboard
+import pystray
 
 
 class QueueWriter:
@@ -30,11 +33,13 @@ class BotApp:
         self.messages: queue.Queue[str] = queue.Queue()
         self.worker: threading.Thread | None = None
         self.original_stdout = sys.stdout
+        self.in_setup = False
 
         root.title("Orenya Answer Bot")
         root.geometry("760x500")
         root.minsize(620, 380)
         root.protocol("WM_DELETE_WINDOW", self.close)
+        root.bind("<Unmap>", self.on_unmap)
 
         controls = ttk.Frame(root, padding=12)
         controls.pack(fill="x")
@@ -55,7 +60,59 @@ class BotApp:
         scrollbar.pack(side="right", fill="y")
 
         sys.stdout = QueueWriter(self.messages)
+        self.tray = self.create_tray_icon()
+        self.tray.run_detached()
+        self.hotkeys = keyboard.Listener(on_press=self.on_hotkey)
+        self.hotkeys.start()
         self.root.after(100, self.drain_messages)
+
+    def create_tray_icon(self) -> pystray.Icon:
+        image = Image.new("RGB", (64, 64), "#080C09")
+        draw = ImageDraw.Draw(image)
+        draw.rounded_rectangle((7, 7, 57, 57), radius=12, fill="#F79346")
+        draw.text((20, 14), "O", fill="black")
+
+        def action(callback):
+            return lambda _icon, _item: self.root.after(0, callback)
+
+        menu = pystray.Menu(
+            pystray.MenuItem("Show", action(self.show_window), default=True),
+            pystray.MenuItem("Start Repeat", action(self.start_repeat)),
+            pystray.MenuItem("Run Once", action(self.run_once)),
+            pystray.MenuItem("Stop", action(self.stop)),
+            pystray.Menu.SEPARATOR,
+            pystray.MenuItem("Exit", action(self.close)),
+        )
+        icon = pystray.Icon("orenya_bot", image, "Orenya Answer Bot", menu)
+        icon.visible = False
+        return icon
+
+    def on_unmap(self, _event=None) -> None:
+        if self.in_setup:
+            return
+        self.root.after(100, self.hide_if_minimized)
+
+    def hide_if_minimized(self) -> None:
+        if self.root.state() == "iconic":
+            self.root.withdraw()
+            self.tray.visible = True
+
+    def show_window(self) -> None:
+        self.tray.visible = False
+        self.root.deiconify()
+        self.root.state("normal")
+        self.root.lift()
+        self.root.focus_force()
+
+    def on_hotkey(self, key) -> None:
+        if key == keyboard.Key.f7:
+            self.root.after(0, self.start_repeat)
+        elif key == keyboard.Key.f8:
+            self.root.after(0, self.run_once)
+        elif key == keyboard.Key.f9:
+            self.root.after(0, self.setup)
+        elif key == keyboard.Key.f10:
+            self.root.after(0, self.stop)
 
     def config(self) -> dict | None:
         try:
@@ -89,10 +146,12 @@ class BotApp:
         if self.worker and self.worker.is_alive():
             messagebox.showinfo("Bot running", "Stop the bot before running setup.")
             return
+        self.in_setup = True
         self.root.withdraw()
         try:
             bot.setup(self.root)
         finally:
+            self.in_setup = False
             self.root.deiconify()
             self.root.lift()
             self.root.focus_force()
@@ -130,6 +189,8 @@ class BotApp:
 
     def close(self) -> None:
         bot.stop_requested.set()
+        self.hotkeys.stop()
+        self.tray.stop()
         sys.stdout = self.original_stdout
         self.root.destroy()
 
