@@ -399,13 +399,32 @@ def find_orenya_submit(region: list[int]) -> tuple[int, int] | None:
         y_min, y_max = 450, 900
         left, right = 0, region[2]
 
-    return find_color_cluster(
-        region, (0xF7, 0x93, 0x46), left, right,
-        screen_y_min=y_min, screen_y_max=y_max,
+    # Enabled buttons are bright orange; the same control is brown while its
+    # state is changing or before selection. Both occupy the same layout slot.
+    return (
+        find_color_cluster(
+            region, (0xF7, 0x93, 0x46), left, right,
+            screen_y_min=y_min, screen_y_max=y_max,
+        )
+        or find_color_cluster(
+            region, (0x77, 0x4E, 0x29), left, right,
+            screen_y_min=y_min, screen_y_max=y_max,
+        )
     )
 
 
-def show_orenya_sections(region: list[int], expected_count: int | None = None) -> list[tuple[int, int]]:
+def find_orenya_ready_submit(region: list[int]) -> tuple[int, int] | None:
+    """Refind the moved submit control by its #774E29 ready-state color."""
+    if last_question_center_y is not None:
+        return find_color_cluster(
+            region, (0x77, 0x4E, 0x29), region[2] - 230, region[2] - 70,
+            screen_y_min=last_question_center_y + 10,
+            screen_y_max=last_question_center_y + 180,
+        )
+    return find_color_cluster(region, (0x77, 0x4E, 0x29), 0, region[2])
+
+
+def show_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
     global last_first_item
     positions = find_orenya_sections(region, expected_count)
     if not positions:

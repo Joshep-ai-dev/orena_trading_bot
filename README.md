@@ -44,9 +44,14 @@ The bot selects browser text by clicking near the region's top-left, Shift-click
 bottom-left, and copying. Runtime logs are limited to selections, clicks, waits, retries, and
 errors. After clicking Submit, the mouse moves 300 pixels left while keeping the same Y position.
 
+<<<<<<< HEAD
 Answer cards are primarily found from their wide `#050806` interiors, with `#0F1511` boundaries
 as fallback. Text is parsed first so the detected card count must match the A-D answer count before
 anything is clicked. Each item is clicked at its detected rectangle center. Submit is searched below the last item's center and near the
+=======
+Answer sections are found using item color `#080C09` and `#0F1511` boundaries; each item is clicked
+at its detected rectangle center. Submit is searched below the last item's center and near the
+>>>>>>> 87673944444356e10849f6bc98c5a485f1b8c5a4
 area's right edge. Only its enabled bright `#F79346` state is clickable; the brown `#774E29`
 disabled state is never submitted. After clicking, repeat mode waits for the bright state to
 disappear, pauses five seconds for the next task, and continues.
