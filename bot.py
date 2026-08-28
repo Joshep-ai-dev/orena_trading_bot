@@ -189,6 +189,34 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
     item_mask = np.max(np.abs(pixels - item_color), axis=2) <= 12
     bright = np.max(pixels, axis=2) >= 150
 
+    def snap_to_click_color(position: tuple[int, int]) -> tuple[int, int]:
+        """Move a center to the nearest exact #050806 pixel within 5 px."""
+        local_x = position[0] - region[0]
+        local_y = position[1] - region[1]
+        target = np.array([0x05, 0x08, 0x06], dtype=np.int16)
+        if 0 <= local_x < width and 0 <= local_y < height:
+            if np.array_equal(pixels[local_y, local_x], target):
+                return position
+        offsets = sorted(
+            (
+                (dx * dx + dy * dy, dx, dy)
+                for dy in range(-5, 6)
+                for dx in range(-5, 6)
+                if dx * dx + dy * dy <= 25
+            ),
+            key=lambda value: value[0],
+        )
+        for _distance, dx, dy in offsets:
+            candidate_x, candidate_y = local_x + dx, local_y + dy
+            if not (0 <= candidate_x < width and 0 <= candidate_y < height):
+                continue
+            if np.array_equal(pixels[candidate_y, candidate_x], target):
+                return region[0] + candidate_x, region[1] + candidate_y
+        return position
+
+    def corrected(positions: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        return [snap_to_click_color(position) for position in positions]
+
     def item_center(top_edge: int, bottom_edge: int) -> tuple[int, int]:
         """Return the center of the #080C09 item pixels within two boundaries."""
         ys, xs = np.nonzero(item_mask[top_edge + 1:bottom_edge])
@@ -218,7 +246,7 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
             continue
         separated_sections.append(item_center(top_edge, bottom_edge))
     if len(separated_sections) >= 2:
-        return separated_sections
+        return corrected(separated_sections)
 
     # Primary method: try many columns across the right half. Card widths and
     # rounded corners vary, so right-10 may be outside their visible borders.
@@ -240,7 +268,7 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
             best_column_sections = candidate_sections
 
     if len(best_column_sections) >= 2:
-        return best_column_sections
+        return corrected(best_column_sections)
 
     # A section's dark horizontal border spans much more of the row than its text.
     border_rows = np.flatnonzero(np.count_nonzero(color_distance >= 4, axis=1) >= max(20, int(width * 0.70)))
@@ -262,7 +290,7 @@ def find_orenya_sections(region: list[int]) -> list[tuple[int, int]]:
     for position in sections:
         if not unique or abs(position[1] - unique[-1][1]) >= 12:
             unique.append(position)
-    return unique
+    return corrected(unique)
 
 
 def find_color_cluster(
