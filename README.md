@@ -53,8 +53,9 @@ Answer sections are found using item color `#080C09` and `#0F1511` boundaries; e
 at its detected rectangle center. Submit is searched below the last item's center and near the
 >>>>>>> 87673944444356e10849f6bc98c5a485f1b8c5a4
 area's right edge. Only its enabled bright `#F79346` state is clickable; the brown `#774E29`
-disabled state is never submitted. After clicking, repeat mode waits for the bright state to
-disappear, pauses five seconds for the next task, and continues.
+disabled state is never submitted. After clicking, repeat mode waits until the entire old Submit
+area disappears. It then re-detects the next task's answer layout and waits until a new bright or
+brown Submit area appears below the new last item before continuing.
 
 Before an answer position is returned, its center pixel is checked for exact color `#050806`.
 If necessary, the detector moves it to the nearest matching pixel within a 30-pixel radius.

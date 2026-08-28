@@ -406,6 +406,27 @@ def find_orenya_submit(region: list[int]) -> tuple[int, int] | None:
     )
 
 
+def find_orenya_submit_area(region: list[int]) -> tuple[int, int] | None:
+    """Find either enabled or disabled Submit after recalculating its layout area."""
+    enabled = find_orenya_submit(region)
+    if enabled:
+        return enabled
+    if last_question_center_y is not None:
+        y_min = last_question_center_y + 10
+        y_max = last_question_center_y + 180
+        left, right = region[2] - 230, region[2] - 70
+    elif last_question_bottom is not None:
+        y_min, y_max = last_question_bottom, last_question_bottom + 140
+        left, right = region[2] - 230, region[2] - 70
+    else:
+        y_min, y_max = 450, 900
+        left, right = 0, region[2]
+    return find_color_cluster(
+        region, (0x77, 0x4E, 0x29), left, right,
+        screen_y_min=y_min, screen_y_max=y_max,
+    )
+
+
 def show_orenya_sections(region: list[int], expected_count: int | None = None) -> list[tuple[int, int]]:
     global last_first_item
     if expected_count is None:
@@ -575,22 +596,25 @@ def click_orenya_submit(region: list[int]) -> tuple[int, int] | None:
 
 
 def wait_for_next_orenya(region: list[int]) -> bool:
-    """Wait until enabled Submit disappears, then allow the next task to render."""
-    deadline = time.monotonic() + 20.0
+    """Wait for old Submit to vanish, then re-find the next task's Submit area."""
+    print("Waiting for the submitted task to disappear...", flush=True)
     while not stop_requested.is_set():
-        if find_orenya_submit(region) is None:
+        if find_orenya_submit_area(region) is None:
             break
-        if time.monotonic() >= deadline:
-            print("Submit stayed enabled for 20 seconds; restarting the F7 workflow.", flush=True)
-            return True
         time.sleep(0.2)
 
     if stop_requested.is_set():
         return False
 
-    if stop_requested.wait(8.0):
-        return False
-    return True
+    print("Waiting for the next task's Submit area...", flush=True)
+    while not stop_requested.is_set():
+        # The number and vertical positions of answers may change on every task.
+        # Re-detect them before calculating the new Submit search rectangle.
+        find_orenya_sections(region)
+        if find_orenya_submit_area(region) is not None:
+            return True
+        time.sleep(0.2)
+    return False
 
 
 def run_once(config: dict, prefetched_text: str | None = None) -> tuple[int, int] | str | None:
