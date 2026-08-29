@@ -34,6 +34,11 @@ answer controls, performs their Selection/Invoke action, and invokes the enabled
 control. It waits for the accessibility-tree answer signature to change before processing the next
 task. Orenya is not activated and the physical mouse is not moved.
 
+When Electron does not publish the shopping query as a UIA element, the bot reads the exact
+`task.query` and option text from Orenya's live Chromium HTTP cache through a shared Win32 file
+handle. Cached text is accepted only when its A-D labels match the answer controls currently
+exposed by UI Automation.
+
 F7 completes answer selection and submission, then examines the next UIA result. If it contains
 `Rate limit exceeded`, the bot waits 10 minutes and starts the complete F7 cycle again.
 

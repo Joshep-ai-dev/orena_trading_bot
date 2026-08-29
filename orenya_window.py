@@ -7,6 +7,8 @@ import re
 import time
 
 from pywinauto import Desktop
+from pywinauto import uia_defines
+from comtypes import COMError
 import win32con
 import win32gui
 
@@ -34,10 +36,16 @@ class OrenyaObject:
 
 @dataclass
 class OrenyaTask:
+    question: str
+    question_source: str
+    question_rectangle: tuple[int, int, int, int] | None
     text: str
     answers: list[tuple[str, str]]
     rate_limited: bool
-    signature: tuple[tuple[str, str], ...]
+    error_message: str
+    submit_present: bool
+    submit_enabled: bool
+    signature: tuple[object, ...]
     answer_controls: dict[str, object]
 
 
@@ -97,6 +105,29 @@ def classify(control_type: str, name: str, automation_id: str, class_name: str) 
     return "other"
 
 
+def _inactive_coordinate_offset(window) -> tuple[int, int]:
+    """Translate minimized off-screen coordinates to the saved normal placement."""
+    handle = int(window.handle)
+    if not win32gui.IsIconic(handle):
+        return 0, 0
+    try:
+        normal_left, normal_top, _right, _bottom = win32gui.GetWindowPlacement(handle)[4]
+        current = window.element_info.rectangle
+        return normal_left - current.left, normal_top - current.top
+    except Exception:
+        return 0, 0
+
+
+def _translated_bounds(rectangle, offset: tuple[int, int]) -> tuple[int, int, int, int]:
+    dx, dy = offset
+    return (
+        rectangle.left + dx,
+        rectangle.top + dy,
+        rectangle.right + dx,
+        rectangle.bottom + dy,
+    )
+
+
 def detect_objects() -> tuple[int, list[OrenyaObject]]:
     """Enumerate accessible objects below the Orenya native window handle."""
     window = find_orenya_window()
@@ -151,16 +182,93 @@ def _named_controls(window) -> list[object]:
     return [control for _top, _left, control in controls]
 
 
+def _text_pattern_documents(window) -> list[str]:
+    """Read rendered Electron text even when it has no standalone UIA Name."""
+    documents: list[str] = []
+    seen: set[str] = set()
+    for control in [window, *window.descendants()]:
+        try:
+            value = control.iface_text.DocumentRange.GetText(-1)
+        except (uia_defines.NoPatternInterfaceError, COMError, AttributeError):
+            continue
+        value = (value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if value and value not in seen:
+            seen.add(value)
+            documents.append(value)
+    return documents
+
+
+def _question_from_document(text: str) -> str:
+    """Extract the query line immediately before Orenya's fixed instruction."""
+    lines = [" ".join(line.split()) for line in text.split("\n") if line.strip()]
+    for index, line in enumerate(lines):
+        if "pick the best product" not in line.casefold():
+            continue
+        for candidate in reversed(lines[:index]):
+            lowered = candidate.casefold()
+            if "product match" not in lowered and candidate:
+                return candidate
+    return ""
+
+
+def _find_exact_text_range(window, wanted: str) -> tuple[str, tuple[int, int, int, int] | None]:
+    """Find exact rendered text by UIA Name or TextPattern range."""
+    normalized = " ".join(wanted.split()).casefold()
+    for control in window.descendants():
+        try:
+            name = " ".join((control.element_info.name or "").split())
+        except Exception:
+            continue
+        if name.casefold() == normalized:
+            rect = control.element_info.rectangle
+            return (
+                f"UIA element name; type={control.element_info.control_type!r}",
+                _translated_bounds(rect, _inactive_coordinate_offset(window)),
+            )
+    for control in [window, *window.descendants()]:
+        try:
+            text_range = control.iface_text.DocumentRange.FindText(wanted, False, True)
+            if not text_range:
+                continue
+            exact = " ".join((text_range.GetText(-1) or "").split())
+            if exact.casefold() != normalized:
+                continue
+            rectangles = list(text_range.GetBoundingRectangles() or [])
+            bounds = None
+            if len(rectangles) >= 4:
+                lefts = rectangles[0::4]
+                tops = rectangles[1::4]
+                rights = [x + width for x, width in zip(lefts, rectangles[2::4])]
+                bottoms = [y + height for y, height in zip(tops, rectangles[3::4])]
+                raw = type("TextBounds", (), {
+                    "left": int(min(lefts)), "top": int(min(tops)),
+                    "right": int(max(rights)), "bottom": int(max(bottoms)),
+                })()
+                bounds = _translated_bounds(raw, _inactive_coordinate_offset(window))
+            info = control.element_info
+            return f"UIA TextPattern range; parent={info.control_type!r} name={(info.name or '').strip()!r}", bounds
+        except (uia_defines.NoPatternInterfaceError, COMError, AttributeError, TypeError, ValueError):
+            continue
+    return "not exposed as an exact UIA element or TextRange", None
+
+
 def read_task() -> OrenyaTask:
     """Read the current task entirely through Windows UI Automation."""
     window = find_orenya_window()
     if window is None:
         raise RuntimeError("No top-level 'Orenya Commerce Agent' window handle was found.")
     controls = _named_controls(window)
+    document_texts = _text_pattern_documents(window)
     lines: list[str] = []
     answers: dict[str, tuple[str, object]] = {}
+    submit_present = False
+    submit_enabled = False
+    error_messages: list[str] = []
+    entries: list[tuple[int, int, int, str]] = []
     for control in controls:
         name = (control.element_info.name or "").strip()
+        rectangle = control.element_info.rectangle
+        entries.append((rectangle.top, rectangle.left, rectangle.bottom, name))
         if not lines or lines[-1] != name:
             lines.append(name)
         match = re.match(r"^\s*([A-D])[.):]\s*(.+)$", name, re.DOTALL)
@@ -171,18 +279,92 @@ def read_task() -> OrenyaTask:
             # card and a nested text node for the same answer.
             if label not in answers or len(value) > len(answers[label][0]):
                 answers[label] = (value, control)
+        lowered = name.casefold()
+        if lowered == "submit answer":
+            submit_present = True
+            try:
+                submit_enabled = submit_enabled or bool(control.is_enabled())
+            except Exception:
+                pass
+        control_type = (control.element_info.control_type or "").casefold()
+        if control_type in {"text", "statusbar", "group", "custom"} and any(
+            marker in lowered
+            for marker in ("error:", "error occurred", "failed to", "unable to", "invalid request")
+        ):
+            error_messages.append(name)
     ordered = [(label, answers[label][0]) for label in "ABCD" if label in answers]
     text = "\n".join(lines)
+    question = ""
+    answer_entries = [entry for entry in entries if re.match(r"^\s*[A-D][.):]\s*", entry[3])]
+    first_answer_top = min((entry[0] for entry in answer_entries), default=10**9)
+    answer_left = min((entry[1] for entry in answer_entries), default=0)
+    instruction_top = min(
+        (top for top, left, bottom, line in entries
+         if top < first_answer_top and "pick the best product" in line.casefold()),
+        default=first_answer_top,
+    )
+    question_candidates = []
+    for top, left, bottom, line in entries:
+        lowered = line.casefold()
+        if (
+            not line
+            or top >= instruction_top
+            or instruction_top - bottom > 160
+            or abs(left - answer_left) > 100
+            or "product match" in lowered
+            or "pick the best" in lowered
+            or "rewards" in lowered
+            or lowered in {"shop", "train & earn", "submit answer", "skip"}
+        ):
+            continue
+        question_candidates.append((bottom, line))
+    if question_candidates:
+        # The shopping query is the nearest same-column text immediately above
+        # Orenya's fixed "Pick the best product..." instruction.
+        question = max(question_candidates)[1]
+    # TextPattern is authoritative when Chromium renders the query without a
+    # separate accessible element/name.
+    document_questions = [
+        candidate for candidate in (_question_from_document(value) for value in document_texts)
+        if candidate
+    ]
+    if document_questions:
+        question = min(document_questions, key=len)
+    if document_texts:
+        text = max(document_texts, key=len)
+    try:
+        from orenya_cache import cached_question_and_answers
+        cached = cached_question_and_answers()
+    except Exception:
+        cached = None
+    if cached:
+        cached_question, cached_answers = cached
+        cached_labels = {label for label, _value in cached_answers}
+        exposed_labels = set(answers)
+        # Only combine cache text with UIA controls when both describe the same
+        # A-D layout. This prevents a stale cached response driving a new page.
+        if cached_labels == exposed_labels:
+            question = cached_question
+            ordered = cached_answers
+    question_source, question_rectangle = _find_exact_text_range(window, question) if question else ("empty", None)
+    if cached and question == cached[0]:
+        question_source = "Orenya Chromium cache task.query (exact API JSON)"
     return OrenyaTask(
+        question=question,
+        question_source=question_source,
+        question_rectangle=question_rectangle,
         text=text,
         answers=ordered,
         rate_limited="rate limit exceeded" in text.casefold(),
-        signature=tuple(ordered),
+        error_message=error_messages[0] if error_messages else "",
+        submit_present=submit_present,
+        submit_enabled=submit_enabled,
+        signature=(question, *ordered),
         answer_controls={label: answers[label][1] for label in answers},
     )
 
 
-def _perform_accessible_action(control) -> str:
+def _perform_accessible_action(control) -> tuple[str, OrenyaObject]:
     """Invoke a UIA action without focus, screen coordinates, or mouse input."""
     candidates = []
     current = control
@@ -200,20 +382,53 @@ def _perform_accessible_action(control) -> str:
             ("SelectionItem", "Select"),
             ("Invoke", "Invoke"),
             ("Toggle", "Toggle"),
+            ("LegacyIAccessible", "DoDefaultAction"),
         ):
             try:
-                interface = getattr(candidate, f"iface_{pattern.casefold().replace('item', '_item')}")
+                interface_name = {
+                    "SelectionItem": "iface_selection_item",
+                    "Invoke": "iface_invoke",
+                    "Toggle": "iface_toggle",
+                    "LegacyIAccessible": "iface_legacy_iaccessible",
+                }[pattern]
+                if pattern == "LegacyIAccessible":
+                    interface = uia_defines.get_elem_interface(
+                        candidate.element_info.element, "LegacyIAccessible"
+                    )
+                else:
+                    interface = getattr(candidate, interface_name)
+                window = find_orenya_window()
+                if window is None:
+                    raise RuntimeError("Orenya window handle disappeared before the UIA action.")
+                matched = _control_object(candidate, window)
                 getattr(interface, method)()
-                return pattern
-            except Exception as exc:
+                return pattern, matched
+            except (uia_defines.NoPatternInterfaceError, COMError, AttributeError) as exc:
                 errors.append(type(exc).__name__)
     raise RuntimeError(
-        "Electron did not expose SelectionItem, Invoke, or Toggle for this element "
+        "Electron did not expose SelectionItem, Invoke, Toggle, or LegacyIAccessible action "
         f"(attempts: {', '.join(sorted(set(errors))) or 'none'})."
     )
 
 
-def select_answer(label: str, task: OrenyaTask | None = None) -> str:
+def _control_object(control, window) -> OrenyaObject:
+    info = control.element_info
+    rectangle = info.rectangle
+    name = (info.name or "").strip()
+    return OrenyaObject(
+        kind=classify(info.control_type or "", name, info.automation_id or "", info.class_name or ""),
+        name=name,
+        control_type=info.control_type or "",
+        automation_id=info.automation_id or "",
+        class_name=info.class_name or "",
+        rectangle=_translated_bounds(rectangle, _inactive_coordinate_offset(window)),
+        enabled=bool(control.is_enabled()),
+        visible=bool(control.is_visible()),
+        handle=int(info.handle or 0),
+    )
+
+
+def select_answer(label: str, task: OrenyaTask | None = None) -> tuple[str, OrenyaObject]:
     task = task or read_task()
     control = task.answer_controls.get(label.upper())
     if control is None:
@@ -221,7 +436,7 @@ def select_answer(label: str, task: OrenyaTask | None = None) -> str:
     return _perform_accessible_action(control)
 
 
-def submit_answer() -> str:
+def submit_answer() -> tuple[str, OrenyaObject]:
     """Find and invoke the enabled Submit answer control through UIA."""
     window = find_orenya_window()
     if window is None:

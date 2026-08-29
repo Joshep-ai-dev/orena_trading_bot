@@ -635,21 +635,39 @@ def run_once(config: dict | None = None, prefetched_task=None):
     if not task.answers:
         print("No A/B/C/D answers are exposed in Orenya's UI Automation tree; retrying.", flush=True)
         return RATE_LIMIT_RETRY
-    query = extract_query(task.text)
+    query = task.question
+    print(f"Question (UIA): {query!r}", flush=True)
+    print(
+        f"Question object: {task.question_source}; rect={task.question_rectangle}",
+        flush=True,
+    )
+    for label, value in task.answers:
+        print(f"Answer {label} (UIA): {value}", flush=True)
     model_text = "\n".join([query] + [f"{label}. {value}" for label, value in task.answers])
     selected, scores = choose_local_answer(model_text)
     best_score = dict(scores).get(selected, 0.0)
     print(f"Selected answer: {selected} (score={best_score:.4f})", flush=True)
     if not wait_for_daily_schedule():
         return None
-    action = select_answer(selected, task)
-    print(f"Answer {selected} selected through UIA {action}Pattern.", flush=True)
+    action, answer_object = select_answer(selected, task)
+    print(
+        f"Exact answer object: label={selected} name={answer_object.name!r} "
+        f"type={answer_object.control_type!r} automation_id={answer_object.automation_id!r} "
+        f"rect={answer_object.rectangle} enabled={answer_object.enabled}",
+        flush=True,
+    )
+    print(f"Answer {selected} selected through UIA {action}Pattern; mouse events=0.", flush=True)
     if stop_requested.wait(0.2) or not wait_for_daily_schedule():
         return None
     deadline = time.monotonic() + 20.0
     while not stop_requested.is_set():
         try:
-            submit_action = submit_answer()
+            submit_action, submit_object = submit_answer()
+            print(
+                f"Exact submit object: name={submit_object.name!r} "
+                f"type={submit_object.control_type!r} automation_id={submit_object.automation_id!r}",
+                flush=True,
+            )
             print(f"Submit invoked through UIA {submit_action}Pattern.", flush=True)
             return task.signature
         except RuntimeError as exc:
@@ -661,18 +679,22 @@ def run_once(config: dict | None = None, prefetched_task=None):
 
 
 def _wait_for_next_uia(old_signature):
-    """Wait until UIA exposes a new task or a rate-limit result."""
+    """Classify post-submit UIA state and wait for a complete new task."""
     from orenya_window import read_task
     print("Waiting for the next UI Automation task...", flush=True)
     while not stop_requested.is_set():
         try:
             task = read_task()
-            if task.rate_limited or (task.answers and task.signature != old_signature):
-                return task
+            if task.rate_limited:
+                return "rate_limit", task
+            if task.error_message:
+                return "error", task
+            if task.answers and task.signature != old_signature and task.submit_present:
+                return "ready", task
         except RuntimeError:
             pass
         stop_requested.wait(0.2)
-    return None
+    return "stopped", None
 
 
 def run_repeating(config: dict | None = None) -> None:
@@ -687,13 +709,16 @@ def run_repeating(config: dict | None = None) -> None:
             continue
         if not old_signature:
             return
-        next_task = _wait_for_next_uia(old_signature)
-        if next_task is None:
+        state, next_task = _wait_for_next_uia(old_signature)
+        if state == "stopped" or next_task is None:
             return
-        if next_task.rate_limited:
+        if state == "rate_limit":
             print("Next result is rate-limited.", flush=True)
             if not pause_for_rate_limit():
                 return
+        elif state == "error":
+            print(f"Orenya error: {next_task.error_message}", flush=True)
+            return
         else:
             prefetched_task = next_task
 
