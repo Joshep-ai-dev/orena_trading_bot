@@ -39,6 +39,11 @@ last_question_bottom: int | None = None
 last_question_center_y: int | None = None
 expected_answer_count: int | None = None
 RATE_LIMIT_RETRY = "__RATE_LIMIT_RETRY__"
+
+
+def ux(status: str, message: str) -> None:
+    """Write one clear, user-facing status line."""
+    print(f"[{status}] {message}", flush=True)
 GMT_PLUS_9 = timezone(timedelta(hours=9))
 
 
@@ -533,10 +538,10 @@ def choose_local_answer(text: str) -> tuple[str, list[tuple[str, float]]]:
 
 
 def pause_for_rate_limit() -> bool:
-    print("Orenya rate limit detected; waiting 10 minutes before one retry...", flush=True)
+    ux("PAUSED", "Rate limit reached. Retrying in 10 minutes.")
     if stop_requested.wait(600.0):
         return False
-    print("10-minute wait finished; running one F7 retry check.", flush=True)
+    ux("RESUMED", "The 10-minute wait is complete. Trying again.")
     return True
 
 
@@ -548,14 +553,10 @@ def wait_for_daily_schedule() -> bool:
         return not stop_requested.is_set()
     resume_at = now.replace(hour=9, minute=0, second=0, microsecond=0)
     seconds = max(0.0, (resume_at - now).total_seconds())
-    print(
-        f"GMT+9 schedule pause at {now:%H:%M:%S}; resuming at 09:00:00 "
-        f"({seconds:.1f}s remaining).",
-        flush=True,
-    )
+    ux("PAUSED", f"Daily pause is active. Resuming at 09:00:00 GMT+9.")
     if stop_requested.wait(seconds):
         return False
-    print("GMT+9 time is 09:00:00; automation resumed.", flush=True)
+    ux("RESUMED", "Daily pause finished.")
     return True
 
 
@@ -633,46 +634,31 @@ def run_once(config: dict | None = None, prefetched_task=None):
     from orenya_window import read_task, select_answer, submit_answer
     task = prefetched_task if prefetched_task is not None else read_task()
     if not task.answers:
-        print("No A/B/C/D answers are exposed in Orenya's UI Automation tree; retrying.", flush=True)
+        ux("WAITING", "The current question is not ready yet.")
         return RATE_LIMIT_RETRY
     query = task.question
-    print(f"Question (UIA): {query!r}", flush=True)
-    print(
-        f"Question object: {task.question_source}; rect={task.question_rectangle}",
-        flush=True,
-    )
+    ux("QUESTION", query or "Question text is unavailable.")
     for label, value in task.answers:
-        print(f"Answer {label} (UIA): {value}", flush=True)
+        ux("OPTION", f"{label}. {value}")
     model_text = "\n".join([query] + [f"{label}. {value}" for label, value in task.answers])
-    selected, scores = choose_local_answer(model_text)
-    best_score = dict(scores).get(selected, 0.0)
-    print(f"Selected answer: {selected} (score={best_score:.4f})", flush=True)
+    selected, _scores = choose_local_answer(model_text)
+    selected_text = dict(task.answers).get(selected, "")
+    ux("SELECTED", f"{selected}. {selected_text}")
     if not wait_for_daily_schedule():
         return None
-    action, answer_object = select_answer(selected, task)
-    print(
-        f"Exact answer object: label={selected} name={answer_object.name!r} "
-        f"type={answer_object.control_type!r} automation_id={answer_object.automation_id!r} "
-        f"rect={answer_object.rectangle} enabled={answer_object.enabled}",
-        flush=True,
-    )
-    print(f"Answer {selected} selected through UIA {action}Pattern; mouse events=0.", flush=True)
+    _action, _answer_object = select_answer(selected, task)
+    ux("ACTION", f"Answer {selected} selected.")
     if stop_requested.wait(0.2) or not wait_for_daily_schedule():
         return None
     deadline = time.monotonic() + 20.0
     while not stop_requested.is_set():
         try:
-            submit_action, submit_object = submit_answer()
-            print(
-                f"Exact submit object: name={submit_object.name!r} "
-                f"type={submit_object.control_type!r} automation_id={submit_object.automation_id!r}",
-                flush=True,
-            )
-            print(f"Submit invoked through UIA {submit_action}Pattern.", flush=True)
+            _submit_action, _submit_object = submit_answer()
+            ux("SUBMITTED", "Answer submitted successfully.")
             return task.signature
         except RuntimeError as exc:
             if time.monotonic() >= deadline:
-                print(f"Cannot submit through UI Automation: {exc}", flush=True)
+                ux("ERROR", f"Could not submit the answer: {exc}")
                 return None
             stop_requested.wait(0.1)
     return None
@@ -681,7 +667,8 @@ def run_once(config: dict | None = None, prefetched_task=None):
 def _wait_for_next_uia(old_signature):
     """Classify post-submit UIA state and wait for a complete new task."""
     from orenya_window import read_task
-    print("Waiting for the next UI Automation task...", flush=True)
+    ux("WAITING", "Waiting for the next question.")
+    last_error = ""
     while not stop_requested.is_set():
         try:
             task = read_task()
@@ -691,8 +678,11 @@ def _wait_for_next_uia(old_signature):
                 return "error", task
             if task.answers and task.signature != old_signature and task.submit_present:
                 return "ready", task
-        except RuntimeError:
-            pass
+        except RuntimeError as exc:
+            message = str(exc)
+            if message != last_error:
+                ux("WAITING", message)
+                last_error = message
         stop_requested.wait(0.2)
     return "stopped", None
 
@@ -713,11 +703,11 @@ def run_repeating(config: dict | None = None) -> None:
         if state == "stopped" or next_task is None:
             return
         if state == "rate_limit":
-            print("Next result is rate-limited.", flush=True)
+            ux("NOTICE", "Orenya reported a rate limit.")
             if not pause_for_rate_limit():
                 return
         elif state == "error":
-            print(f"Orenya error: {next_task.error_message}", flush=True)
+            ux("ERROR", next_task.error_message)
             return
         else:
             prefetched_task = next_task
@@ -764,7 +754,7 @@ def main() -> int:
 
     listener = keyboard.Listener(on_press=on_press)
     listener.start()
-    print("Ready: F7 repeat | F8 once | F9 setup again | F10 quit")
+    ux("READY", "F7: start repeating | F8: answer once | F10: stop")
     while True:
         action = events.get()
         if action == "quit":
@@ -773,7 +763,7 @@ def main() -> int:
         if action == "setup":
             listener.stop()
             setup()
-            print("Restart the bot to use the new settings.")
+            ux("NOTICE", "Restart the program to apply the legacy setup change.")
             return 0
         if action in ("capture", "repeat") and busy.acquire(blocking=False):
             try:
@@ -784,7 +774,7 @@ def main() -> int:
                         if run_once(config) != RATE_LIMIT_RETRY:
                             break
             except Exception as exc:  # Keep the hotkey service alive and expose the real error.
-                print(f"Capture failed: {exc}", file=sys.stderr, flush=True)
+                ux("ERROR", str(exc))
             finally:
                 busy.release()
 

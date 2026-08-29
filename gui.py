@@ -136,7 +136,7 @@ class BotApp:
             try:
                 target(config)
             except Exception as exc:
-                print(f"Bot failed: {exc}", flush=True)
+                bot.ux("ERROR", str(exc))
             finally:
                 self.root.after(0, lambda: self.status.set("Ready"))
 
@@ -172,7 +172,7 @@ class BotApp:
     def stop(self) -> None:
         bot.stop_requested.set()
         self.status.set("Stopping...")
-        print("Stop requested.", flush=True)
+        bot.ux("STOPPED", "Automation stopped by the user.")
 
     def inspect_orenya(self) -> None:
         try:
