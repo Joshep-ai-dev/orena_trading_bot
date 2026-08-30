@@ -629,10 +629,13 @@ def wait_for_next_orenya(region: list[int]) -> bool:
 
 def run_once(config: dict | None = None, prefetched_task=None):
     """Read, choose, select, and submit using UI Automation only."""
+    cycle_started = time.perf_counter()
     if not wait_for_daily_schedule():
         return None
     from orenya_window import read_task, select_answer, submit_answer
+    read_started = time.perf_counter()
     task = prefetched_task if prefetched_task is not None else read_task()
+    read_elapsed = 0.0 if prefetched_task is not None else time.perf_counter() - read_started
     if not task.answers:
         ux("WAITING", "The current question is not ready yet.")
         return RATE_LIMIT_RETRY
@@ -646,19 +649,37 @@ def run_once(config: dict | None = None, prefetched_task=None):
     ux("SELECTED", f"{selected}. {selected_text}")
     if not wait_for_daily_schedule():
         return None
+    select_started = time.perf_counter()
     _action, _answer_object = select_answer(selected, task)
+    select_elapsed = time.perf_counter() - select_started
     ux("ACTION", f"Answer {selected} selected.")
     if stop_requested.wait(0.2) or not wait_for_daily_schedule():
         return None
     deadline = time.monotonic() + 20.0
+    submit_started = time.perf_counter()
     while not stop_requested.is_set():
         try:
-            _submit_action, _submit_object = submit_answer()
+            _submit_action, _submit_object = submit_answer(task)
+            submit_elapsed = time.perf_counter() - submit_started
+            total_elapsed = time.perf_counter() - cycle_started
             ux("SUBMITTED", "Answer submitted successfully.")
+            ux(
+                "TIMING",
+                "read={:.2f}s select={:.2f}s submit={:.2f}s total={:.2f}s".format(
+                    read_elapsed, select_elapsed, submit_elapsed, total_elapsed
+                ),
+            )
             return task.signature
         except RuntimeError as exc:
             if time.monotonic() >= deadline:
+                submit_elapsed = time.perf_counter() - submit_started
                 ux("ERROR", f"Could not submit the answer: {exc}")
+                ux(
+                    "TIMING",
+                    "read={:.2f}s select={:.2f}s submit_failed_after={:.2f}s".format(
+                        read_elapsed, select_elapsed, submit_elapsed
+                    ),
+                )
                 return None
             stop_requested.wait(0.1)
     return None
@@ -669,14 +690,39 @@ def _wait_for_next_uia(old_signature):
     from orenya_window import read_task
     ux("WAITING", "Waiting for the next question.")
     last_error = ""
+    wait_started = time.perf_counter()
+    read_count = 0
+    slowest_read = 0.0
     while not stop_requested.is_set():
         try:
+            read_started = time.perf_counter()
             task = read_task()
+            read_elapsed = time.perf_counter() - read_started
+            read_count += 1
+            slowest_read = max(slowest_read, read_elapsed)
             if task.rate_limited:
+                ux(
+                    "TIMING",
+                    "wait_next={:.2f}s read_calls={} slowest_read={:.2f}s".format(
+                        time.perf_counter() - wait_started, read_count, slowest_read
+                    ),
+                )
                 return "rate_limit", task
             if task.error_message:
+                ux(
+                    "TIMING",
+                    "wait_next={:.2f}s read_calls={} slowest_read={:.2f}s".format(
+                        time.perf_counter() - wait_started, read_count, slowest_read
+                    ),
+                )
                 return "error", task
             if task.answers and task.signature != old_signature and task.submit_present:
+                ux(
+                    "TIMING",
+                    "wait_next={:.2f}s read_calls={} slowest_read={:.2f}s".format(
+                        time.perf_counter() - wait_started, read_count, slowest_read
+                    ),
+                )
                 return "ready", task
         except RuntimeError as exc:
             message = str(exc)

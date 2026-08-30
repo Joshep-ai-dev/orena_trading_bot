@@ -14,6 +14,7 @@ import win32gui
 
 
 WINDOW_TITLE = "Orenya Commerce Agent"
+_cached_window_handle: int | None = None
 
 
 @dataclass(frozen=True)
@@ -47,13 +48,21 @@ class OrenyaTask:
     submit_enabled: bool
     signature: tuple[object, ...]
     answer_controls: dict[str, object]
+    submit_control: object | None = None
 
 
 def find_orenya_window():
     """Return Orenya's top-level UIA wrapper, including background/hidden windows."""
+    global _cached_window_handle
+    if _cached_window_handle and win32gui.IsWindow(_cached_window_handle):
+        title = win32gui.GetWindowText(_cached_window_handle).strip()
+        if WINDOW_TITLE.casefold() in title.casefold():
+            return Desktop(backend="uia").window(handle=_cached_window_handle)
+        _cached_window_handle = None
     for window in Desktop(backend="uia").windows(visible_only=False, enabled_only=False):
         title = window.window_text().strip()
         if WINDOW_TITLE.casefold() in title.casefold():
+            _cached_window_handle = int(window.handle)
             return window
     # Some Electron windows do not appear through the UIA top-level query while
     # inactive. Enumerate native HWNDs, then wrap the match with UIA.
@@ -67,6 +76,7 @@ def find_orenya_window():
 
     win32gui.EnumWindows(enum_window, None)
     if handles:
+        _cached_window_handle = handles[0]
         return Desktop(backend="uia").window(handle=handles[0])
     return None
 
@@ -167,10 +177,10 @@ def detect_objects() -> tuple[int, list[OrenyaObject]]:
     return int(window.handle), objects
 
 
-def _named_controls(window) -> list[object]:
+def _named_controls(window, descendants: list[object] | None = None) -> list[object]:
     """Return all named descendants in visual order without activating the window."""
     controls = []
-    for control in window.descendants():
+    for control in descendants if descendants is not None else window.descendants():
         try:
             name = (control.element_info.name or "").strip()
             rectangle = control.element_info.rectangle
@@ -182,11 +192,12 @@ def _named_controls(window) -> list[object]:
     return [control for _top, _left, control in controls]
 
 
-def _text_pattern_documents(window) -> list[str]:
+def _text_pattern_documents(window, descendants: list[object] | None = None) -> list[str]:
     """Read rendered Electron text even when it has no standalone UIA Name."""
     documents: list[str] = []
     seen: set[str] = set()
-    for control in [window, *window.descendants()]:
+    controls = [window, *(descendants if descendants is not None else window.descendants())]
+    for control in controls:
         try:
             value = control.iface_text.DocumentRange.GetText(-1)
         except (uia_defines.NoPatternInterfaceError, COMError, AttributeError):
@@ -211,10 +222,15 @@ def _question_from_document(text: str) -> str:
     return ""
 
 
-def _find_exact_text_range(window, wanted: str) -> tuple[str, tuple[int, int, int, int] | None]:
+def _find_exact_text_range(
+    window,
+    wanted: str,
+    descendants: list[object] | None = None,
+) -> tuple[str, tuple[int, int, int, int] | None]:
     """Find exact rendered text by UIA Name or TextPattern range."""
     normalized = " ".join(wanted.split()).casefold()
-    for control in window.descendants():
+    controls = descendants if descendants is not None else window.descendants()
+    for control in controls:
         try:
             name = " ".join((control.element_info.name or "").split())
         except Exception:
@@ -225,7 +241,7 @@ def _find_exact_text_range(window, wanted: str) -> tuple[str, tuple[int, int, in
                 f"UIA element name; type={control.element_info.control_type!r}",
                 _translated_bounds(rect, _inactive_coordinate_offset(window)),
             )
-    for control in [window, *window.descendants()]:
+    for control in [window, *controls]:
         try:
             text_range = control.iface_text.DocumentRange.FindText(wanted, False, True)
             if not text_range:
@@ -257,12 +273,14 @@ def read_task() -> OrenyaTask:
     window = find_orenya_window()
     if window is None:
         raise RuntimeError("No top-level 'Orenya Commerce Agent' window handle was found.")
-    controls = _named_controls(window)
-    document_texts = _text_pattern_documents(window)
+    descendants = list(window.descendants())
+    controls = _named_controls(window, descendants)
+    document_texts = _text_pattern_documents(window, descendants)
     lines: list[str] = []
     answers: dict[str, tuple[str, object]] = {}
     submit_present = False
     submit_enabled = False
+    submit_control = None
     error_messages: list[str] = []
     entries: list[tuple[int, int, int, str]] = []
     for control in controls:
@@ -282,8 +300,11 @@ def read_task() -> OrenyaTask:
         lowered = name.casefold()
         if lowered == "submit answer":
             submit_present = True
+            submit_control = submit_control or control
             try:
-                submit_enabled = submit_enabled or bool(control.is_enabled())
+                if control.is_enabled():
+                    submit_enabled = True
+                    submit_control = control
             except Exception:
                 pass
         control_type = (control.element_info.control_type or "").casefold()
@@ -346,7 +367,9 @@ def read_task() -> OrenyaTask:
         if cached_labels == exposed_labels:
             question = cached_question
             ordered = cached_answers
-    question_source, question_rectangle = _find_exact_text_range(window, question) if question else ("empty", None)
+    question_source, question_rectangle = (
+        _find_exact_text_range(window, question, descendants) if question else ("empty", None)
+    )
     if cached and question == cached[0]:
         question_source = "Orenya Chromium cache task.query (exact API JSON)"
     return OrenyaTask(
@@ -361,11 +384,16 @@ def read_task() -> OrenyaTask:
         submit_enabled=submit_enabled,
         signature=(question, *ordered),
         answer_controls={label: answers[label][1] for label in answers},
+        submit_control=submit_control,
     )
 
 
-def _perform_accessible_action(control) -> tuple[str, OrenyaObject]:
+def _perform_accessible_action(control, window=None) -> tuple[str, OrenyaObject]:
     """Invoke a UIA action without focus, screen coordinates, or mouse input."""
+    if window is None:
+        window = find_orenya_window()
+    if window is None:
+        raise RuntimeError("Orenya window handle disappeared before the UIA action.")
     candidates = []
     current = control
     for _ in range(5):
@@ -397,9 +425,6 @@ def _perform_accessible_action(control) -> tuple[str, OrenyaObject]:
                     )
                 else:
                     interface = getattr(candidate, interface_name)
-                window = find_orenya_window()
-                if window is None:
-                    raise RuntimeError("Orenya window handle disappeared before the UIA action.")
                 matched = _control_object(candidate, window)
                 getattr(interface, method)()
                 return pattern, matched
@@ -436,15 +461,21 @@ def select_answer(label: str, task: OrenyaTask | None = None) -> tuple[str, Oren
     return _perform_accessible_action(control)
 
 
-def submit_answer() -> tuple[str, OrenyaObject]:
+def submit_answer(task: OrenyaTask | None = None) -> tuple[str, OrenyaObject]:
     """Find and invoke the enabled Submit answer control through UIA."""
     window = find_orenya_window()
     if window is None:
         raise RuntimeError("Orenya window handle disappeared.")
+    if task is not None and task.submit_control is not None:
+        try:
+            if task.submit_control.is_enabled():
+                return _perform_accessible_action(task.submit_control, window)
+        except Exception:
+            pass
     for control in _named_controls(window):
         name = (control.element_info.name or "").strip().casefold()
         if name == "submit answer" and control.is_enabled():
-            return _perform_accessible_action(control)
+            return _perform_accessible_action(control, window)
     raise RuntimeError("Enabled 'Submit answer' UI Automation element was not found.")
 
 
