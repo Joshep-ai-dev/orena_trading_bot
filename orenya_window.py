@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-import time
 
 from pywinauto import Desktop
 from pywinauto import uia_defines
@@ -79,27 +78,6 @@ def find_orenya_window():
         _cached_window_handle = handles[0]
         return Desktop(backend="uia").window(handle=handles[0])
     return None
-
-
-def activate_orenya_window() -> int | None:
-    """Restore/show/focus Orenya so screen capture and physical clicks are reliable."""
-    window = find_orenya_window()
-    if window is None:
-        return None
-    handle = int(window.handle)
-    if win32gui.IsIconic(handle):
-        win32gui.ShowWindow(handle, win32con.SW_RESTORE)
-    elif not win32gui.IsWindowVisible(handle):
-        win32gui.ShowWindow(handle, win32con.SW_SHOW)
-    try:
-        win32gui.SetForegroundWindow(handle)
-    except Exception:
-        try:
-            window.set_focus()
-        except Exception:
-            pass
-    time.sleep(0.2)
-    return handle
 
 
 def classify(control_type: str, name: str, automation_id: str, class_name: str) -> str:

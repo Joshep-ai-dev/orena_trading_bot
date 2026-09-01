@@ -62,8 +62,8 @@ nodes. The same inspection is available from:
 python bot.py --inspect-window
 ```
 
-Inactive and minimized Orenya windows can be inspected without foreground activation. If Orenya
-closes its UI and leaves only background processes, there is no HWND or accessibility tree until
+Inactive, minimized, and hidden Orenya windows can be read and automated without foreground
+activation. If Orenya closes its UI and leaves only background processes, there is no HWND or accessibility tree until
 it opens a window again. Controls not published by Electron's accessibility tree cannot be read or
 invoked by Windows UI Automation.
 
