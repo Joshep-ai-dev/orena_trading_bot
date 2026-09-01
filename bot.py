@@ -23,7 +23,11 @@ import time
 from pathlib import Path
 import tkinter as tk
 
-from PIL import ImageGrab, ImageTk
+import mss
+import numpy as np
+from PIL import Image, ImageGrab, ImageTk
+import pyautogui
+import pyperclip
 from pynput import keyboard
 
 
@@ -31,8 +35,12 @@ APP_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
 CONFIG_PATH = APP_DIR / "config.json"
 events: queue.Queue[str] = queue.Queue()
 stop_requested = threading.Event()
+last_first_item: tuple[int, int] | None = None
+last_question_bottom: int | None = None
+last_question_center_y: int | None = None
+expected_answer_count: int | None = None
 RATE_LIMIT_RETRY = "__RATE_LIMIT_RETRY__"
-SELECT_DELAY_RANGE = (3.0, 4.0)
+SELECT_DELAY_RANGE = (1.0, 1.5)
 SUBMIT_DELAY_RANGE = (0.4, 0.7)
 
 
@@ -160,6 +168,301 @@ def setup(parent: tk.Misc | None = None) -> None:
     print(f"Saved {CONFIG_PATH}")
 
 
+def capture_raw(region: list[int]) -> Image.Image:
+    left, top, width, height = region
+    with mss.mss() as sct:
+        raw = sct.grab({"left": left, "top": top, "width": width, "height": height})
+    return Image.frombytes("RGB", raw.size, raw.rgb)
+
+
+def grouped_rows(rows: np.ndarray, maximum_gap: int = 3) -> list[tuple[int, int]]:
+    if len(rows) == 0:
+        return []
+    groups: list[tuple[int, int]] = []
+    start = previous = int(rows[0])
+    for value in rows[1:]:
+        value = int(value)
+        if value - previous > maximum_gap:
+            groups.append((start, previous))
+            start = value
+        previous = value
+    groups.append((start, previous))
+    return groups
+
+
+def find_orenya_sections(region: list[int], expected_count: int | None = None) -> list[tuple[int, int]]:
+    """Locate bordered answer sections and return screen click positions."""
+    global last_question_bottom, last_question_center_y
+    last_question_bottom = None
+    last_question_center_y = None
+    pixels = np.asarray(capture_raw(region), dtype=np.int16)
+    height, width = pixels.shape[:2]
+    background = np.array([0x05, 0x08, 0x06], dtype=np.int16)
+    color_distance = np.max(np.abs(pixels - background), axis=2)
+    item_color = np.array([0x08, 0x0C, 0x09], dtype=np.int16)
+    item_mask = np.max(np.abs(pixels - item_color), axis=2) <= 12
+    bright = np.max(pixels, axis=2) >= 150
+
+    def snap_to_click_color(position: tuple[int, int]) -> tuple[int, int]:
+        """Move a center to the nearest exact #050806 pixel within 30 px."""
+        local_x = position[0] - region[0]
+        local_y = position[1] - region[1]
+        target = np.array([0x05, 0x08, 0x06], dtype=np.int16)
+        if 0 <= local_x < width and 0 <= local_y < height:
+            if np.array_equal(pixels[local_y, local_x], target):
+                return position
+        offsets = sorted(
+            (
+                (dx * dx + dy * dy, dx, dy)
+                for dy in range(-30, 31)
+                for dx in range(-30, 31)
+                if dx * dx + dy * dy <= 900
+            ),
+            key=lambda value: value[0],
+        )
+        for _distance, dx, dy in offsets:
+            candidate_x, candidate_y = local_x + dx, local_y + dy
+            if not (0 <= candidate_x < width and 0 <= candidate_y < height):
+                continue
+            if np.array_equal(pixels[candidate_y, candidate_x], target):
+                return region[0] + candidate_x, region[1] + candidate_y
+        return position
+
+    def corrected(positions: list[tuple[int, int]]) -> list[tuple[int, int]]:
+        return [snap_to_click_color(position) for position in positions]
+
+    def finish(positions: list[tuple[int, int]], bottom_edge: int) -> list[tuple[int, int]]:
+        global last_question_bottom, last_question_center_y
+        if expected_count and len(positions) > expected_count:
+            # Headers/panels can resemble an answer card. Answers are the last
+            # expected_count card-shaped regions before the Submit row.
+            positions = positions[-expected_count:]
+        last_question_bottom = region[1] + bottom_edge
+        result = corrected(positions)
+        if result:
+            last_question_center_y = result[-1][1]
+        return result
+
+    # Actual answer cards have a wide #050806 interior. Detect those horizontal
+    # fill bands before using the older separator/background fallbacks.
+    fill_rows = np.flatnonzero(
+        np.count_nonzero(color_distance <= 6, axis=1) >= max(40, int(width * 0.35))
+    )
+    fill_bands = grouped_rows(fill_rows, maximum_gap=1)
+    filled_sections: list[tuple[int, int]] = []
+    filled_bottom = 0
+    for start, end in fill_bands:
+        band_height = end - start + 1
+        if not 25 <= band_height <= min(180, height):
+            continue
+        if np.count_nonzero(bright[start:end + 1]) < 8:
+            continue
+        ys, xs = np.nonzero(color_distance[start:end + 1] <= 6)
+        if len(xs) < 40:
+            continue
+        center_x = (int(xs.min()) + int(xs.max())) // 2
+        filled_sections.append((region[0] + center_x, region[1] + (start + end) // 2))
+        filled_bottom = end
+    if expected_count and len(filled_sections) >= expected_count:
+        filled_sections = filled_sections[-expected_count:]
+    if len(filled_sections) >= 2 and (expected_count is None or len(filled_sections) == expected_count):
+        return finish(filled_sections, filled_bottom)
+
+    def item_center(top_edge: int, bottom_edge: int) -> tuple[int, int]:
+        """Return the center of the #080C09 item pixels within two boundaries."""
+        ys, xs = np.nonzero(item_mask[top_edge + 1:bottom_edge])
+        if len(xs) >= 20:
+            left_edge, right_edge = int(xs.min()), int(xs.max())
+            center_x = (left_edge + right_edge) // 2
+        else:
+            center_x = width // 2
+        return region[0] + center_x, region[1]  +  (top_edge + bottom_edge) // 2
+
+    # Primary separator method: #0F1511 is the horizontal color between items.
+    separator = np.array([0x0F, 0x15, 0x11], dtype=np.int16)
+    separator_distance = np.max(np.abs(pixels - separator), axis=2)
+    separator_rows = np.flatnonzero(
+        np.count_nonzero(separator_distance <= 6, axis=1) >= max(12, int(width * 0.20))
+    )
+    separator_bands = grouped_rows(separator_rows, maximum_gap=2)
+    separator_centers = [(start + end) // 2 for start, end in separator_bands]
+    separated_sections: list[tuple[int, int]] = []
+    separated_bottom = 0
+    for top_edge, bottom_edge in zip(separator_centers, separator_centers[1:]):
+        item_height = bottom_edge - top_edge
+        if not 18 <= item_height <= min(220, height):
+            continue
+        if np.count_nonzero(bright[top_edge + 1:bottom_edge]) < 8:
+            continue
+        if np.count_nonzero(item_mask[top_edge + 1:bottom_edge]) < 20:
+            continue
+        separated_sections.append(item_center(top_edge, bottom_edge))
+        separated_bottom = bottom_edge
+    if len(separated_sections) >= 2:
+        return finish(separated_sections, separated_bottom)
+
+    # Primary method: try many columns across the right half. Card widths and
+    # rounded corners vary, so right-10 may be outside their visible borders.
+    # The best column is the one that separates the most text-containing runs.
+    best_column_sections: list[tuple[int, int]] = []
+    best_column_bottom = 0
+    step = max(2, width // 80)
+    for scan_x in range(width - 6, max(0, width // 2), -step):
+        background_rows = np.flatnonzero(color_distance[:, scan_x] <= 6)
+        background_runs = grouped_rows(background_rows, maximum_gap=1)
+        candidate_sections: list[tuple[int, int]] = []
+        candidate_bottom = 0
+        for start, end in background_runs:
+            run_height = end - start + 1
+            if not 18 <= run_height <= min(220, height):
+                continue
+            if np.count_nonzero(bright[start:end + 1]) < 8:
+                continue
+            candidate_sections.append(item_center(start, end))
+            candidate_bottom = end
+        if len(candidate_sections) > len(best_column_sections):
+            best_column_sections = candidate_sections
+            best_column_bottom = candidate_bottom
+
+    if len(best_column_sections) >= 2:
+        return finish(best_column_sections, best_column_bottom)
+
+    # A section's dark horizontal border spans much more of the row than its text.
+    border_rows = np.flatnonzero(np.count_nonzero(color_distance >= 4, axis=1) >= max(20, int(width * 0.70)))
+    borders = grouped_rows(border_rows)
+    border_centers = [(start + end) // 2 for start, end in borders]
+
+    sections: list[tuple[int, int]] = []
+    sections_bottom = 0
+    for top_edge, bottom_edge in zip(border_centers, border_centers[1:]):
+        section_height = bottom_edge - top_edge
+        if not 18 <= section_height <= min(220, height):
+            continue
+        # Reject spaces between cards: a real card contains visible text.
+        if np.count_nonzero(bright[top_edge + 1:bottom_edge]) < 8:
+            continue
+        sections.append(item_center(top_edge, bottom_edge))
+        sections_bottom = bottom_edge
+
+    # Remove duplicate centers caused by thick or decorated borders.
+    unique: list[tuple[int, int]] = []
+    for position in sections:
+        if not unique or abs(position[1] - unique[-1][1]) >= 12:
+            unique.append(position)
+    if unique:
+        return finish(unique, sections_bottom)
+    return []
+
+
+def find_color_cluster(
+    region: list[int],
+    color: tuple[int, int, int],
+    left: int,
+    right: int,
+    tolerance: int = 45,
+    screen_y_min: int = 450,
+    screen_y_max: int = 900,
+) -> tuple[int, int] | None:
+    """Find the bottom-most color cluster within the requested screen-Y range."""
+    pixels = np.asarray(capture_raw(region), dtype=np.int16)
+    height, width = pixels.shape[:2]
+    target_color = np.array(color, dtype=np.int16)
+    left = max(0, min(width - 1, left))
+    right = max(left + 1, min(width, right))
+    top = max(0, screen_y_min - region[1])
+    bottom = min(height, screen_y_max - region[1] + 1)
+    if top >= bottom:
+        return None
+    strip = pixels[top:bottom, left:right]
+    # Treat nearby rendered shades as the same button color. Browser gradients,
+    # display scaling, and antialiasing commonly shift RGB channels slightly.
+    distance = np.max(np.abs(strip - target_color), axis=2)
+    matching = distance <= tolerance
+
+    # Locate the lowest substantial orange band, then use the bounding-box
+    # center of its pixels instead of assuming one exact x coordinate.
+    # A submit button is a filled color block. Requiring several matching
+    # pixels per row rejects thin orange outlines around selected answers.
+    minimum_row_pixels = max(12, min(30, (right - left) // 20))
+    matching_rows = np.flatnonzero(
+        np.count_nonzero(matching, axis=1) >= minimum_row_pixels
+    )
+    runs = grouped_rows(matching_rows, maximum_gap=2)
+    if not runs:
+        return None
+    start, end = runs[-1]
+    ys, xs = np.nonzero(matching[start:end + 1])
+    if len(xs) < 100:
+        return None
+    local_x = (int(xs.min()) + int(xs.max())) // 2
+    local_y = start + (int(ys.min()) + int(ys.max())) // 2
+    return region[0] + left + local_x, region[1] + top + local_y
+
+
+def find_orenya_submit(region: list[int]) -> tuple[int, int] | None:
+    """Find only the bright, enabled Submit button below the last answer item."""
+    if last_question_center_y is not None:
+        y_min = last_question_center_y + 10
+        y_max = last_question_center_y + 180
+        left, right = region[2] - 230, region[2] - 70
+    elif last_question_bottom is not None:
+        y_min, y_max = last_question_bottom, last_question_bottom + 140
+        left, right = region[2] - 230, region[2] - 70
+    else:
+        y_min, y_max = 450, 900
+        left, right = 0, region[2]
+
+    return find_color_cluster(
+        region, (0xF7, 0x93, 0x46), left, right,
+        screen_y_min=y_min, screen_y_max=y_max,
+    )
+
+
+def find_orenya_submit_area(region: list[int]) -> tuple[int, int] | None:
+    """Find either enabled or disabled Submit after recalculating its layout area."""
+    enabled = find_orenya_submit(region)
+    if enabled:
+        return enabled
+    if last_question_center_y is not None:
+        y_min = last_question_center_y + 10
+        y_max = last_question_center_y + 180
+        left, right = region[2] - 230, region[2] - 70
+    elif last_question_bottom is not None:
+        y_min, y_max = last_question_bottom, last_question_bottom + 140
+        left, right = region[2] - 230, region[2] - 70
+    else:
+        y_min, y_max = 450, 900
+        left, right = 0, region[2]
+    return find_color_cluster(
+        region, (0x77, 0x4E, 0x29), left, right,
+        screen_y_min=y_min, screen_y_max=y_max,
+    )
+
+
+def copy_orenya_text(region: list[int]) -> str:
+    """Select the Orenya region as browser text and return the clipboard value."""
+    left, top, _width, height = region
+    top_left = (left + 5, top + 5)
+    bottom_right = (left +_width - 5, top + height - 5)
+    pyperclip.copy("")
+    pyautogui.click(*top_left)
+    time.sleep(0.1)
+    pyautogui.keyDown("shift")
+    try:
+        pyautogui.click(*bottom_right)
+    finally:
+        pyautogui.keyUp("shift")
+    time.sleep(0.001)
+    pyautogui.hotkey("ctrl", "c")
+    deadline = time.monotonic() + 0.5
+    while time.monotonic() < deadline:
+        text = pyperclip.paste().strip()
+        if text:
+            return text
+        time.sleep(0.01)
+    return ""
+
+
 def extract_answer_list(text: str) -> list[tuple[str, str]]:
     """Extract multiline A/B/C/D entries from selected Orenya page text."""
     text = re.split(r"(?im)^\s*(?:Submit answer|Skip)\s*$", text, maxsplit=1)[0]
@@ -245,6 +548,73 @@ def wait_for_daily_schedule() -> bool:
         return False
     ux("RESUMED", "Daily pause finished.")
     return True
+
+
+def answer_index(result_text: str) -> tuple[str, int]:
+    """Map A-D to items 1-4; all other recognized text maps to item 1."""
+    match = re.search(r"(?im)^\s*(?:ANSWER\s*[:\-]?\s*)?([ABCD])(?:\s*[.):\-]|\s*$)", result_text)
+    if not match:
+        return "other", 0
+    answer = match.group(1).upper()
+    return answer, ord(answer) - ord("A")
+
+
+def click_orenya_answer(result_text: str, positions: list[tuple[int, int]]) -> bool:
+    answer, index = answer_index(result_text)
+    if not positions:
+        print("Cannot click Orenya: no answer sections were detected.", flush=True)
+        return False
+    if index >= len(positions):
+        print(f"Item {index + 1} was not found; selecting the first item instead.", flush=True)
+        index = 0
+        answer = "fallback-first"
+    x, y = positions[index]
+    pyautogui.click(x, y)
+    print(f"Orenya click: answer={answer}, item={index + 1}, x={x}, y={y}", flush=True)
+    return True
+
+
+def click_orenya_submit(region: list[int]) -> tuple[int, int] | None:
+    deadline = time.monotonic() + 20.0
+    position = None
+    while not stop_requested.is_set() and time.monotonic() < deadline:
+        position = find_orenya_submit(region)
+        if position:
+            break
+        time.sleep(0.1)
+    if not position:
+        print("Cannot click Submit: enabled #F79346 button was not found within 20 seconds.", flush=True)
+        return None
+    pyautogui.click(*position)
+    moved_x = max(0, position[0] - 300)
+    pyautogui.moveTo(moved_x, position[1], duration=0.15)
+    print(
+        f"Submit clicked: x={position[0]}, y={position[1]}; mouse moved to x={moved_x}",
+        flush=True,
+    )
+    return position
+
+
+def wait_for_next_orenya(region: list[int]) -> bool:
+    """Wait for old Submit to vanish, then re-find the next task's Submit area."""
+    print("Waiting for the submitted task to disappear...", flush=True)
+    while not stop_requested.is_set():
+        if find_orenya_submit_area(region) is None:
+            break
+        time.sleep(0.2)
+
+    if stop_requested.is_set():
+        return False
+
+    print("Waiting for the next task's Submit area...", flush=True)
+    while not stop_requested.is_set():
+        # The number and vertical positions of answers may change on every task.
+        # Re-detect them before calculating the new Submit search rectangle.
+        find_orenya_sections(region)
+        if find_orenya_submit_area(region) is not None:
+            return True
+        time.sleep(0.2)
+    return False
 
 
 def run_once(config: dict | None = None, prefetched_task=None):

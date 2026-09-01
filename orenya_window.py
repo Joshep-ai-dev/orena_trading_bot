@@ -426,7 +426,28 @@ def _perform_accessible_action(control, window=None) -> tuple[str, OrenyaObject]
                 else:
                     interface = getattr(candidate, interface_name)
                 matched = _control_object(candidate, window)
-                getattr(interface, method)()
+                previous_foreground = win32gui.GetForegroundWindow()
+                try:
+                    getattr(interface, method)()
+                finally:
+                    current_foreground = win32gui.GetForegroundWindow()
+                    try:
+                        current_root = win32gui.GetAncestor(current_foreground, win32con.GA_ROOT)
+                    except Exception:
+                        current_root = current_foreground
+                    # Electron can foreground Orenya as a side effect of a UIA
+                    # action. Restore the user's window only when Orenya stole
+                    # focus; never override a window the user switched to.
+                    if (
+                        previous_foreground
+                        and previous_foreground != int(window.handle)
+                        and current_root == int(window.handle)
+                        and win32gui.IsWindow(previous_foreground)
+                    ):
+                        try:
+                            win32gui.SetForegroundWindow(previous_foreground)
+                        except Exception:
+                            pass
                 return pattern, matched
             except (uia_defines.NoPatternInterfaceError, COMError, AttributeError) as exc:
                 errors.append(type(exc).__name__)
