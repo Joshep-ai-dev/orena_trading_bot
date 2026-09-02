@@ -51,10 +51,10 @@ F10 can stop the bot during this scheduled pause.
 python gui.py
 ```
 
-The interface provides Start Repeat, Run Once, Stop, inspection, and a live log. Minimizing it hides
+The interface provides Start Repeat, Run Once, Stop, and a live log. Minimizing it hides
 it to a system-tray icon. The bot and global hotkeys continue working while its GUI is inactive.
 
-**Inspect Orenya** attaches to the top-level `Orenya Commerce Agent` window and prints every object
+The command-line inspector attaches to the top-level `Orenya Commerce Agent` window and prints every object
 Electron publishes to Windows UI Automation, including invisible, off-screen, and zero-rectangle
 nodes. The same inspection is available from:
 

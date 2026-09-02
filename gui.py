@@ -15,6 +15,9 @@ from pynput import keyboard
 import pystray
 
 
+MAX_LOG_LINES = 500
+
+
 class QueueWriter:
     def __init__(self, messages: queue.Queue[str]) -> None:
         self.messages = messages
@@ -44,11 +47,9 @@ class BotApp:
 
         controls = ttk.Frame(root, padding=12)
         controls.pack(fill="x")
-        ttk.Button(controls, text="Setup", command=self.setup).pack(side="left", padx=(0, 8))
-        ttk.Button(controls, text="Start Repeat (F7)", command=self.start_repeat).pack(side="left", padx=8)
+        ttk.Button(controls, text="Start Repeat (F7)", command=self.start_repeat).pack(side="left", padx=(0, 8))
         ttk.Button(controls, text="Run Once (F8)", command=self.run_once).pack(side="left", padx=8)
         ttk.Button(controls, text="Stop (F10)", command=self.stop).pack(side="left", padx=8)
-        ttk.Button(controls, text="Inspect Orenya", command=self.inspect_orenya).pack(side="left", padx=8)
 
         self.status = tk.StringVar(value="Ready")
         ttk.Label(root, textvariable=self.status, padding=(12, 0, 12, 8)).pack(fill="x")
@@ -190,6 +191,10 @@ class BotApp:
         if chunks:
             self.log.configure(state="normal")
             self.log.insert("end", "".join(chunks))
+            line_count = int(self.log.index("end-1c").split(".")[0])
+            excess_lines = line_count - MAX_LOG_LINES
+            if excess_lines > 0:
+                self.log.delete("1.0", f"{excess_lines + 1}.0")
             self.log.see("end")
             self.log.configure(state="disabled")
         self.root.after(100, self.drain_messages)
